@@ -27,6 +27,7 @@ interface ChatScreenProps {
   onCloudMessageChange?: (message: ChatMessage) => void;
   onCloudMessageDelete?: (message: ChatMessage) => void;
   onCloudLogoChange?: (message: ChatMessage, file: File | undefined) => Promise<string | undefined>;
+  cloudUserId: string | null;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   onSignOut: () => void;
@@ -44,9 +45,9 @@ function highlightMessage(id: string, setHighlight: (id: string | null) => void)
   window.setTimeout(() => setHighlight(null), 2200);
 }
 
-export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, theme, onThemeChange, onSignOut, onSignIn }: ChatScreenProps) {
+export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn }: ChatScreenProps) {
   const [baseWord, setBaseWord] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>(() => getChatMessages());
+  const [messages, setMessages] = useState<ChatMessage[]>(() => getChatMessages(cloudUserId ?? undefined));
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -65,6 +66,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const initialSyncStartedRef = useRef(false);
+  const sessionUserIdRef = useRef(cloudUserId);
 
   function scrollToMessage(id: string, center = false) {
     window.requestAnimationFrame(() => {
@@ -97,22 +99,32 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   useEffect(() => {
     if (!onInitialSync || initialSyncStartedRef.current) return;
     initialSyncStartedRef.current = true;
-    onInitialSync(messages).then(setMessages).catch(() => undefined);
-  }, [messages, onInitialSync]);
+    onInitialSync(messages).then((syncedMessages) => {
+      if (sessionUserIdRef.current === cloudUserId && (!cloudUserId || getCloudUser()?.id === cloudUserId)) {
+        setMessages(syncedMessages);
+      }
+    }).catch(() => undefined);
+  }, [cloudUserId, messages, onInitialSync]);
 
   useEffect(() => {
-    setChatMessages(messages);
-  }, [messages]);
+    if (!cloudUserId || getCloudUser()?.id === cloudUserId) {
+      setChatMessages(messages, cloudUserId ?? undefined);
+    }
+  }, [messages, cloudUserId]);
 
   useEffect(() => {
     function onReload() {
       if (onInitialSync) {
-        onInitialSync(getChatMessages()).then(setMessages).catch(() => undefined);
+        onInitialSync(getChatMessages(cloudUserId ?? undefined)).then((syncedMessages) => {
+          if (sessionUserIdRef.current === cloudUserId && (!cloudUserId || getCloudUser()?.id === cloudUserId)) {
+            setMessages(syncedMessages);
+          }
+        }).catch(() => undefined);
       }
     }
     window.addEventListener('paraules:reload-local', onReload);
     return () => window.removeEventListener('paraules:reload-local', onReload);
-  }, [onInitialSync]);
+  }, [cloudUserId, onInitialSync]);
 
   function optionsToMessageOptions(s: SavedSettings): MessageOptions {
     return {

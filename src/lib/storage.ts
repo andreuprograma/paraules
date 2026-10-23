@@ -2,6 +2,7 @@ const SEED_KEY = 'pwgen.seed';
 const SETTINGS_KEY = 'pwgen.settings';
 const AUTOHIDE_KEY = 'pwgen.autohide';
 const CHAT_KEY = 'pwgen.chat';
+const PIN_LOCKOUT_KEY = 'pwgen.pin_lockout';
 
 export interface MessageOptions {
   length: number;
@@ -59,6 +60,40 @@ export function clearSeed(): void {
   localStorage.removeItem(CHAT_KEY);
 }
 
+export function resetLocalPasswordData(): void {
+  const keysToRemove = new Set<string>([
+    SEED_KEY,
+    SETTINGS_KEY,
+    AUTOHIDE_KEY,
+    PIN_LOCKOUT_KEY,
+  ]);
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key === CHAT_KEY || key?.startsWith(`${CHAT_KEY}.`)) keysToRemove.add(key);
+  }
+
+  const snapshot = new Map<string, string | null>();
+  for (const key of keysToRemove) snapshot.set(key, localStorage.getItem(key));
+
+  try {
+    for (const key of keysToRemove) localStorage.removeItem(key);
+    for (const key of keysToRemove) {
+      if (localStorage.getItem(key) !== null) {
+        throw new Error('No s’han pogut esborrar totes les dades locals.');
+      }
+    }
+  } catch {
+    try {
+      for (const [key, value] of snapshot) {
+        if (value !== null) localStorage.setItem(key, value);
+      }
+    } catch {
+      throw new Error('El restabliment ha fallat i no s’ha pogut restaurar completament l’estat local. No tanquis aquesta pestanya; demana assistència abans de continuar.');
+    }
+    throw new Error('No s’han pogut esborrar les dades locals. S’ha restaurat l’estat anterior.');
+  }
+}
+
 export function getDefaultSettings(): SavedSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -74,9 +109,13 @@ export function setDefaultSettings(settings: SavedSettings): void {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
-export function getChatMessages(): ChatMessage[] {
+function chatStorageKey(userId?: string): string {
+  return userId ? `${CHAT_KEY}.${userId}` : CHAT_KEY;
+}
+
+export function getChatMessages(userId?: string): ChatMessage[] {
   try {
-    const raw = localStorage.getItem(CHAT_KEY);
+    const raw = localStorage.getItem(chatStorageKey(userId));
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -113,8 +152,8 @@ export function getChatMessages(): ChatMessage[] {
   }
 }
 
-export function setChatMessages(messages: ChatMessage[]): void {
-  localStorage.setItem(CHAT_KEY, JSON.stringify(messages));
+export function setChatMessages(messages: ChatMessage[], userId?: string): void {
+  localStorage.setItem(chatStorageKey(userId), JSON.stringify(messages));
 }
 
 export function getAutoHide(): boolean {

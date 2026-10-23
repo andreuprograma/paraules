@@ -53,8 +53,8 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
         onClick={onClose}
       />
       <div
-        className={`fixed bottom-0 left-0 right-0 z-50 bg-white dark:bg-slate-900 rounded-t-3xl border-t border-slate-200 dark:border-slate-700 transition-transform duration-300 max-h-[85vh] overflow-y-auto ${
-          open ? 'translate-y-0' : 'translate-y-full'
+        className={`fixed bottom-0 left-1/2 md:top-1/2 md:bottom-auto z-50 w-full max-w-3xl -translate-x-1/2 bg-white dark:bg-slate-900 rounded-t-3xl md:rounded-3xl border-t border-slate-200 dark:border-slate-700 transition-transform duration-300 max-h-[85dvh] overflow-y-auto ${
+          open ? 'translate-y-0 md:-translate-y-1/2' : 'translate-y-full'
         }`}
       >
         <div className="sticky top-0 bg-white dark:bg-slate-900 pt-3 pb-2 px-5 border-b border-slate-200 dark:border-slate-800">

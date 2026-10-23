@@ -1,7 +1,31 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Lock, Eye, EyeOff, KeyRound } from 'lucide-react';
 import { decryptSeed } from '@/lib/passwordGenerator';
-import { getEncryptedSeed, clearSeed } from '@/lib/storage';
+import { getEncryptedSeed, resetLocalPasswordData } from '@/lib/storage';
+import { clearPinLockout, getPinLockoutStatus, PinLockoutStatus, recordPinFailure } from '@/lib/pinLockout';
+
+interface PinSecurityState {
+  status: PinLockoutStatus | null;
+  error: string;
+}
+
+function readPinSecurityState(): PinSecurityState {
+  try {
+    return { status: getPinLockoutStatus(), error: '' };
+  } catch {
+    return { status: null, error: 'No es pot verificar l’estat del bloqueig. No s’ha desbloquejat la caixa.' };
+  }
+}
+
+function formatRemainingTime(milliseconds: number): string {
+  const totalSeconds = Math.ceil(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours} h ${minutes} min ${seconds} s`;
+  if (minutes > 0) return `${minutes} min ${seconds} s`;
+  return `${seconds} s`;
+}
 
 function formatBuildTime(iso: string): string {
   try {
@@ -16,17 +40,36 @@ function formatBuildTime(iso: string): string {
 
 interface UnlockScreenProps {
   onUnlock: (seed: string) => void;
-  onReset: () => void;
+  onResetLocalData: () => void;
 }
 
-export default function UnlockScreen({ onUnlock, onReset }: UnlockScreenProps) {
+export default function UnlockScreen({ onUnlock, onResetLocalData }: UnlockScreenProps) {
   const [pin, setPin] = useState('');
   const [showPin, setShowPin] = useState(false);
   const [error, setError] = useState('');
-  const [attempts, setAttempts] = useState(0);
+  const [pinSecurity, setPinSecurity] = useState<PinSecurityState>(readPinSecurityState);
+  const persistenceFailureRef = useRef(false);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (!persistenceFailureRef.current) setPinSecurity(readPinSecurityState());
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   function handleUnlock() {
     setError('');
+    const currentSecurity = readPinSecurityState();
+    setPinSecurity(currentSecurity);
+    if (!currentSecurity.status) {
+      setError(currentSecurity.error);
+      return;
+    }
+    if (currentSecurity.status.remainingMs > 0) {
+      setError(`Caixa bloquejada. Torna-ho a provar d’aquí ${formatRemainingTime(currentSecurity.status.remainingMs)}.`);
+      return;
+    }
+
     const encrypted = getEncryptedSeed();
     if (!encrypted) {
       setError('No s’ha trobat cap paraula mestra. Torna a configurar-la.');
@@ -34,17 +77,52 @@ export default function UnlockScreen({ onUnlock, onReset }: UnlockScreenProps) {
     }
     const decrypted = decryptSeed(encrypted, pin);
     if (!decrypted) {
-      setAttempts((a) => a + 1);
-      setError('El PIN no és correcte. Torna-ho a provar.');
+      try {
+        const nextSecurity = recordPinFailure();
+        setPinSecurity({ status: nextSecurity, error: '' });
+        setPin('');
+        setError(nextSecurity.remainingMs > 0
+          ? `PIN incorrecte. Caixa bloquejada durant ${formatRemainingTime(nextSecurity.remainingMs)}.`
+          : `PIN incorrecte. Et queden ${nextSecurity.attemptsRemaining} intents abans del proper bloqueig.`);
+      } catch {
+        persistenceFailureRef.current = true;
+        setPinSecurity({
+          status: null,
+          error: 'No s’ha pogut desar l’estat de seguretat. No s’ha desbloquejat la caixa.',
+        });
+        setError('No s’ha pogut desar l’estat de seguretat. No s’ha desbloquejat la caixa.');
+      }
+      return;
+    }
+    try {
+      clearPinLockout();
+      setPinSecurity({ status: getPinLockoutStatus(), error: '' });
+    } catch {
+      persistenceFailureRef.current = true;
+      setPinSecurity({
+        status: null,
+        error: 'No s’ha pogut actualitzar l’estat de seguretat. No s’ha desbloquejat la caixa.',
+      });
+      setError('No s’ha pogut actualitzar l’estat de seguretat. No s’ha desbloquejat la caixa.');
       return;
     }
     onUnlock(decrypted);
   }
 
-  function handleReset() {
-    if (confirm('Això esborrarà la paraula mestra xifrada. Hauràs de tornar-la a configurar. Vols continuar?')) {
-      clearSeed();
-      onReset();
+  function handleResetLocalData() {
+    setError('');
+    if (!window.confirm('Aquesta acció esborrarà les dades locals de Paraules —incloses les fitxes emmagatzemades en aquest navegador, la paraula secreta xifrada i la configuració— i no es pot desfer. No esborrarà dades del núvol. Vols continuar?')) {
+      return;
+    }
+
+    const confirmation = window.prompt('Per confirmar el restabliment, escriu RESTABLIR. No s’esborrarà res si cancel·les o escrius un altre text.');
+    if (confirmation !== 'RESTABLIR') return;
+
+    try {
+      resetLocalPasswordData();
+      onResetLocalData();
+    } catch (resetError) {
+      setError(resetError instanceof Error ? resetError.message : 'No s’han pogut restablir les dades locals.');
     }
   }
 
@@ -59,6 +137,9 @@ export default function UnlockScreen({ onUnlock, onReset }: UnlockScreenProps) {
             <h1 className="text-2xl font-semibold text-slate-900 dark:text-white tracking-tight">Paraules</h1>
             <p className="text-slate-500 dark:text-slate-400 text-center mt-2 text-[15px]">
               Introdueix el PIN per desxifrar la paraula mestra.
+            </p>
+            <p className="text-slate-500 dark:text-slate-400 text-center mt-2 text-xs">
+              El PIN és una barrera d’accés a aquesta interfície; no és una protecció criptogràfica de les dades.
             </p>
             <p className="text-slate-400 dark:text-slate-600 text-center mt-3 text-[11px] font-mono">
               {formatBuildTime(__BUILD_TIMESTAMP__)}
@@ -75,6 +156,7 @@ export default function UnlockScreen({ onUnlock, onReset }: UnlockScreenProps) {
                   onChange={(e) => setPin(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleUnlock()}
                   placeholder="Introdueix el PIN"
+                  disabled={!pinSecurity.status || pinSecurity.status.remainingMs > 0}
                   autoFocus
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -97,23 +179,35 @@ export default function UnlockScreen({ onUnlock, onReset }: UnlockScreenProps) {
                 {error}
               </div>
             )}
+            {pinSecurity.error && (
+              <div role="alert" className="rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 px-4 py-3 text-red-600 dark:text-red-300 text-sm">
+                {pinSecurity.error}
+              </div>
+            )}
+            {pinSecurity.status && (
+              <p aria-live="polite" className="text-center text-sm text-slate-600 dark:text-slate-400">
+                {pinSecurity.status.remainingMs > 0
+                  ? `Bloqueig actiu: ${formatRemainingTime(pinSecurity.status.remainingMs)} restants.`
+                  : `Intents restants abans del proper bloqueig: ${pinSecurity.status.attemptsRemaining}.`}
+              </p>
+            )}
 
             <button
               onClick={handleUnlock}
-              className="w-full h-12 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-semibold text-[16px] transition-colors flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30"
+              disabled={!pinSecurity.status || pinSecurity.status.remainingMs > 0}
+              className="w-full h-12 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold text-[16px] transition-colors flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30"
             >
               <Lock className="w-5 h-5" />
               Desbloqueja
             </button>
 
-            {attempts >= 3 && (
-              <button
-                onClick={handleReset}
-                className="w-full text-center text-sm text-slate-500 dark:text-slate-500 hover:text-slate-800 dark:hover:text-slate-300 underline"
-              >
-                Has oblidat el PIN? Reinicia la caixa
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleResetLocalData}
+              className="w-full text-center text-sm text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 underline"
+            >
+              Restablir contrasenyes
+            </button>
           </div>
         </div>
       </div>

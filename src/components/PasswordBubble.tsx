@@ -104,6 +104,7 @@ export default function PasswordBubble({
   const [commentDraft, setCommentDraft] = useState(comment);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [symbolsPanelOpen, setSymbolsPanelOpen] = useState(false);
   const [logoPanelOpen, setLogoPanelOpen] = useState(false);
   const [logoQuery, setLogoQuery] = useState('');
   const [logoPreviewUrl, setLogoPreviewUrl] = useState('');
@@ -356,22 +357,21 @@ export default function PasswordBubble({
           )}
 
           <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 p-3">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-slate-600 dark:text-slate-300">Paràmetres per regenerar</span>
-              <span className="font-mono text-xs text-emerald-600 dark:text-emerald-400">{regenerationOptions.length}</span>
             </div>
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex shrink-0 items-center gap-1">
+            <div className="mt-2 flex w-full min-w-0 items-center gap-1">
+              <div className="flex shrink-0 items-center gap-0.5">
                 <button
                   type="button"
                   onClick={() => updateRegenerationOption('length', Math.max(2, regenerationOptions.length - 1))}
                   disabled={regenerationOptions.length <= 2}
                   aria-label="Redueix la llargada per regenerar"
-                  className="h-9 w-9 rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-lg font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="box-border h-9 w-8 rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-lg font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   −
                 </button>
-                <span className="min-w-10 text-center font-mono text-sm font-semibold text-slate-900 dark:text-white" aria-live="polite">
+                <span className="w-6 text-center font-mono text-xs font-semibold text-slate-900 dark:text-white" aria-live="polite">
                   {regenerationOptions.length}
                 </span>
                 <button
@@ -379,12 +379,12 @@ export default function PasswordBubble({
                   onClick={() => updateRegenerationOption('length', Math.min(100, regenerationOptions.length + 1))}
                   disabled={regenerationOptions.length >= 100}
                   aria-label="Augmenta la llargada per regenerar"
-                  className="h-9 w-9 rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-lg font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="box-border h-9 w-8 rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-lg font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   +
                 </button>
               </div>
-              <div className="flex min-w-0 flex-wrap justify-end gap-1">
+              <div className="flex min-w-0 flex-1 items-center gap-1">
                 {([
                   ['uppercase', 'ABC', 'Majúscules'],
                   ['lowercase', 'abc', 'Minúscules'],
@@ -397,14 +397,23 @@ export default function PasswordBubble({
                     aria-pressed={regenerationOptions[key]}
                     title={title}
                     onClick={() => updateRegenerationOption(key, !regenerationOptions[key])}
-                    className={`h-9 min-w-9 px-1 rounded-lg text-xs font-semibold transition-colors ${regenerationOptions[key] ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-300 dark:border-slate-700'}`}
+                    className={`box-border h-9 min-w-0 flex-1 px-0.5 rounded-lg text-[10px] min-[390px]:text-xs font-semibold whitespace-nowrap transition-colors ${regenerationOptions[key] ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-300 dark:border-slate-700'}`}
                   >
                     {label}
                   </button>
                 ))}
               </div>
+              <button
+                type="button"
+                aria-label={symbolsPanelOpen ? 'Amaga els símbols permesos' : 'Mostra els símbols permesos'}
+                aria-expanded={symbolsPanelOpen}
+                onClick={() => setSymbolsPanelOpen((open) => !open)}
+                className="box-border h-9 w-8 shrink-0 rounded-lg bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 flex items-center justify-center"
+              >
+                {symbolsPanelOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
             </div>
-            {regenerationOptions.symbols && (
+            {symbolsPanelOpen && (
               <input
                 type="text"
                 value={regenerationOptions.allowedSymbols}
@@ -415,7 +424,7 @@ export default function PasswordBubble({
                 autoCorrect="off"
                 autoComplete="off"
                 spellCheck={false}
-                className="mt-2 w-full h-9 px-3 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                className="mt-2 box-border h-9 w-full min-w-0 px-3 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
               />
             )}
           </div>
@@ -435,37 +444,35 @@ export default function PasswordBubble({
             </div>
           )}
 
-          <div className="mt-3 flex gap-2">
-            <button onClick={copy} className="flex-1 h-10 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white text-sm font-medium flex items-center justify-center gap-1.5 transition-colors">
-              {copied ? <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" /> : <Copy className="w-4 h-4" />}
-              {copied ? 'Copiada' : 'Copia'}
+          <div className="mt-3 grid w-full min-w-0 grid-cols-3 gap-2 min-[430px]:grid-cols-6">
+            <button onClick={copy} title={copied ? 'Copiada' : 'Copia'} aria-label={copied ? 'Copiada' : 'Copia'} className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white transition-colors">
+              {copied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-4 w-4" />}
             </button>
-            <button onClick={() => setVisible((value) => !value)} className="h-10 px-3 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white flex items-center justify-center transition-colors" aria-label={visible ? 'Amaga' : 'Mostra'}>
+            <button onClick={() => setVisible((value) => !value)} title={visible ? 'Amaga' : 'Mostra'} className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white transition-colors" aria-label={visible ? 'Amaga' : 'Mostra'}>
               {visible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
-            <button onClick={handleCommentButtonClick} className={`h-10 px-3 rounded-lg flex items-center justify-center transition-colors ${comment || commentOpen ? 'bg-emerald-600 text-emerald-50 dark:bg-emerald-700 dark:text-emerald-100' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white'}`} aria-label="Comentari">
+            <button onClick={handleCommentButtonClick} title="Comentari" className={`box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg transition-colors ${comment || commentOpen ? 'bg-emerald-600 text-emerald-50 dark:bg-emerald-700 dark:text-emerald-100' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white'}`} aria-label="Comentari">
               <MessageSquare className="w-4 h-4" />
             </button>
             <button
               type="button"
               onClick={() => { setLogoPanelOpen((open) => !open); setLogoQuery(baseWord); setLogoPreviewUrl(logoUrl || ''); setLogoError(''); setLogoLoading(!!logoUrl); setLogoResolvedDomain(''); }}
-              className={`h-10 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors ${logoPanelOpen || logoUrl ? 'bg-emerald-600 text-white dark:bg-emerald-700' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white'}`}
+              className={`box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg transition-colors ${logoPanelOpen || logoUrl ? 'bg-emerald-600 text-white dark:bg-emerald-700' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white'}`}
               aria-label="Logotip"
               title="Cerca o canvia el logotip"
             >
               <Image className="w-4 h-4" />
-              <span className="text-xs font-medium">Logo</span>
             </button>
             <button
               onClick={handleRegenerateClick}
               disabled={!canRegenerate}
-              className="h-10 px-3 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Torna a generar"
               title={!canRegenerate ? 'La configuració actual coincideix amb la de la contrasenya' : undefined}
             >
               <RefreshCw className="w-4 h-4" />
             </button>
-            <button onClick={() => setDeleteOpen(true)} className="h-10 px-3 rounded-lg bg-red-100 dark:bg-red-950/70 hover:bg-red-200 dark:hover:bg-red-900 active:bg-red-300 dark:active:bg-red-950 text-red-600 dark:text-red-300 flex items-center justify-center transition-colors" aria-label="Esborra">
+            <button onClick={() => setDeleteOpen(true)} title="Esborra" className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-red-100 dark:bg-red-950/70 hover:bg-red-200 dark:hover:bg-red-900 active:bg-red-300 dark:active:bg-red-950 text-red-600 dark:text-red-300 transition-colors" aria-label="Esborra">
               <Trash2 className="w-4 h-4" />
             </button>
           </div>

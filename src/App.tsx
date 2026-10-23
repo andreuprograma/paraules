@@ -10,8 +10,8 @@ import {
   SavedSettings,
 } from '@/lib/storage';
 import { decryptSeed } from '@/lib/passwordGenerator';
-import { getCloudUser, signOut } from '@/lib/pocketbase';
-import { markMessageDeleted, mergeLocalWithCloud, saveMessageLogo, upsertMessage } from '@/lib/cloudSync';
+import { getCloudUser, pb, signOut } from '@/lib/pocketbase';
+import { cancelCloudSyncRequests, markMessageDeleted, mergeLocalWithCloud, saveMessageLogo, upsertMessage } from '@/lib/cloudSync';
 import { applyTheme, getTheme, setTheme, Theme } from '@/lib/theme';
 
 type AppState = 'loading' | 'auth' | 'setup' | 'locked' | 'unlocked';
@@ -30,10 +30,24 @@ export default function App() {
   const [cloudStatus, setCloudStatus] = useState<CloudStatus>('offline');
   const [theme, setThemeState] = useState<Theme>(() => getTheme());
   const lastActivityRef = useRef<number>(Date.now());
+  const [cloudUserId, setCloudUserId] = useState<string | null>(() => getCloudUser()?.id ?? null);
+  const cloudUserIdRef = useRef(cloudUserId);
 
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
+
+  useEffect(() => pb.authStore.onChange(() => {
+    const nextUserId = getCloudUser()?.id ?? null;
+    if (cloudUserIdRef.current === nextUserId) return;
+
+    cancelCloudSyncRequests(cloudUserIdRef.current);
+    cloudUserIdRef.current = nextUserId;
+    setCloudUserId(nextUserId);
+    setSeedWord('');
+    setCloudStatus('offline');
+    setState(nextUserId ? (getEncryptedSeed() ? 'locked' : 'setup') : 'auth');
+  }), []);
 
   function handleThemeChange(next: Theme): void {
     setTheme(next);
@@ -109,48 +123,55 @@ export default function App() {
   }
 
   function handleCloudAuthenticated(): void {
+    setSeedWord('');
     setCloudStatus('synced');
-    if (seedWord && getEncryptedSeed()) {
-      setState('unlocked');
-    } else {
-      continueToApp();
-    }
+    continueToApp();
   }
 
   async function syncInitialMessages(localMessages: ChatMessage[]): Promise<ChatMessage[]> {
-    if (!getCloudUser()) return localMessages;
+    const userId = cloudUserId;
+    if (!userId) return localMessages;
+    if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat.');
     setCloudStatus('syncing');
     try {
-      const merged = await mergeLocalWithCloud(localMessages, seedWord, defaultSettings.autoHide);
+      const merged = await mergeLocalWithCloud(seedWord, defaultSettings.autoHide, userId);
+      if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat.');
       setCloudStatus('synced');
       return merged;
-    } catch {
-      setCloudStatus('error');
-      throw new Error('No s’ha pogut sincronitzar amb el núvol.');
+    } catch (error) {
+      if (getCloudUser()?.id === userId) setCloudStatus('error');
+      throw error;
     }
   }
 
   function syncMessage(message: ChatMessage): void {
-    if (!getCloudUser()) return;
-    upsertMessage(message, seedWord).then(() => setCloudStatus('synced')).catch(() => setCloudStatus('error'));
+    const userId = cloudUserId;
+    if (!userId || getCloudUser()?.id !== userId) return;
+    upsertMessage(message, seedWord, userId)
+      .then(() => { if (getCloudUser()?.id === userId) setCloudStatus('synced'); })
+      .catch(() => { if (getCloudUser()?.id === userId) setCloudStatus('error'); });
   }
 
   function deleteCloudMessage(message: ChatMessage): void {
-    if (!getCloudUser()) return;
-    markMessageDeleted(message, seedWord).then(() => setCloudStatus('synced')).catch(() => setCloudStatus('error'));
+    const userId = cloudUserId;
+    if (!userId || getCloudUser()?.id !== userId) return;
+    markMessageDeleted(message, seedWord, userId)
+      .then(() => { if (getCloudUser()?.id === userId) setCloudStatus('synced'); })
+      .catch(() => { if (getCloudUser()?.id === userId) setCloudStatus('error'); });
   }
 
   async function saveCloudMessageLogo(message: ChatMessage, file: File | undefined): Promise<string | undefined> {
-    if (!getCloudUser()) {
+    const userId = cloudUserId;
+    if (!userId || getCloudUser()?.id !== userId) {
       throw new Error('Inicia sessió al núvol per desar o eliminar el fitxer del logo a PocketBase.');
     }
     setCloudStatus('syncing');
     try {
-      const logoUrl = await saveMessageLogo(message, file, seedWord);
-      setCloudStatus('synced');
+      const logoUrl = await saveMessageLogo(message, file, seedWord, userId);
+      if (getCloudUser()?.id === userId) setCloudStatus('synced');
       return logoUrl;
     } catch (error) {
-      setCloudStatus('error');
+      if (getCloudUser()?.id === userId) setCloudStatus('error');
       const detail = error instanceof Error ? error.message : 'Error desconegut.';
       throw new Error(`No s’ha pogut actualitzar el logo a PocketBase. Comprova la connexió i els permisos de la col·lecció. Detall: ${detail}`);
     }
@@ -160,19 +181,18 @@ export default function App() {
     signOut();
     setCloudStatus('offline');
     setSeedWord('');
+    setDefaultSettings(getDefaultSettings());
     setState('auth');
   }
 
   function handleSignIn(): void {
+    setSeedWord('');
     setState('auth');
   }
 
   function handleSignInCancel(): void {
-    if (seedWord && getEncryptedSeed()) {
-      setState('unlocked');
-    } else {
-      continueToApp();
-    }
+    setSeedWord('');
+    continueToApp();
   }
 
   if (state === 'auth') {
@@ -193,11 +213,12 @@ export default function App() {
     return (
       <UnlockScreen
         onUnlock={(seed) => {
-          if (!seedWord) setSeedWord(seed);
+          setSeedWord(seed);
           setState('unlocked');
         }}
-        onReset={() => {
+        onResetLocalData={() => {
           setSeedWord('');
+          setDefaultSettings(getDefaultSettings());
           setState('setup');
         }}
       />
@@ -206,6 +227,7 @@ export default function App() {
 
   return (
     <ChatScreen
+      key={cloudUserId ?? 'local'}
       seedWord={seedWord}
       defaultSettings={defaultSettings}
       onDefaultSettingsChange={setDefaultSettings}
@@ -219,6 +241,7 @@ export default function App() {
       onCloudMessageChange={syncMessage}
       onCloudMessageDelete={deleteCloudMessage}
       onCloudLogoChange={saveCloudMessageLogo}
+      cloudUserId={cloudUserId}
       theme={theme}
       onThemeChange={handleThemeChange}
       onSignOut={handleSignOut}

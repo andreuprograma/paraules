@@ -83,11 +83,6 @@ export default function SetupScreen({ onComplete }: SetupScreenProps) {
                   {showSeed ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                 </button>
               </div>
-              {seed && (
-                <p className="text-xs text-slate-500 dark:text-slate-500 mt-2">
-                  Normalitzada: <span className="font-mono text-emerald-600 dark:text-emerald-400">{normalizedSeed || '(empty)'}</span>
-                </p>
-              )}
             </div>
 
             <div>
