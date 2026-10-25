@@ -24,6 +24,7 @@ const storage = await importSource(storageSource, 'storage.ts');
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const unlockScreenSource = await readFile(new URL('../src/components/UnlockScreen.tsx', import.meta.url), 'utf8');
 const chatScreenSource = await readFile(new URL('../src/components/ChatScreen.tsx', import.meta.url), 'utf8');
+const recycleBinSource = await readFile(new URL('../src/components/RecycleBinModal.tsx', import.meta.url), 'utf8');
 const pinLockoutSource = await readFile(new URL('../src/lib/pinLockout.ts', import.meta.url), 'utf8');
 const pinLockout = await importSource(pinLockoutSource, 'pinLockout.ts');
 
@@ -50,6 +51,10 @@ const mockPocketBaseUrl = `data:text/javascript,
       update: async (...args) => {
         globalThis.__cloudTest.writes.push(['update', ...args]);
         return globalThis.__cloudTest.update?.(...args);
+      },
+      delete: async (...args) => {
+        globalThis.__cloudTest.writes.push(['delete', ...args]);
+        return globalThis.__cloudTest.delete?.(...args);
       },
     }),
   };
@@ -102,6 +107,29 @@ function chatMessage(baseWord, id = baseWord) {
       symbols: false,
       allowedSymbols: '',
     },
+  };
+}
+
+function cloudRecord(id, overrides = {}) {
+  return {
+    id,
+    user_id: 'account-a',
+    symbol: 'A',
+    encrypted_password: 'alpha',
+    encrypted_comment: 'private comment',
+    password_length: 10,
+    uppercase: true,
+    lowercase: true,
+    numbers: true,
+    symbols: false,
+    allowed_symbols: '',
+    device_id: 'device-a',
+    is_deleted: false,
+    logo: 'logo.png',
+    logo_url: '',
+    created: '2025-01-01 00:00:00Z',
+    updated: '2025-01-02 00:00:00Z',
+    ...overrides,
   };
 }
 
@@ -194,6 +222,101 @@ test('initial cloud loading returns only the authenticated owner records and nev
   assert.deepEqual(globalThis.__cloudTest.writes, []);
 });
 
+test('cloud database inspection is read-only and returns only authenticated PocketBase records with logo fields', async () => {
+  const previousLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const records = [
+    {
+      id: 'owned',
+      user_id: 'account-a',
+      symbol: 'W',
+      encrypted_password: 'whatsapp',
+      encrypted_comment: 'personal note',
+      logo: 'whatsapp.png',
+      logo_url: 'https://example.test/old-logo.png',
+      password_length: 14,
+      uppercase: true,
+      lowercase: true,
+      numbers: false,
+      symbols: true,
+      allowed_symbols: '!@',
+      device_id: 'device-a',
+      is_deleted: false,
+      created: '2025-01-01 00:00:00Z',
+      updated: '2025-01-02 00:00:00Z',
+    },
+    {
+      id: 'not-owned',
+      user_id: 'account-b',
+      symbol: 'N',
+      encrypted_password: 'other-account',
+      password_length: 10,
+      uppercase: true,
+      lowercase: true,
+      numbers: true,
+      symbols: false,
+      is_deleted: false,
+      created: '',
+      updated: '',
+    },
+    {
+      id: 'url-only',
+      user_id: 'account-a',
+      symbol: 'N',
+      encrypted_password: 'netflix',
+      logo: '',
+      logo_url: 'https://cdn.example.test/netflix.png',
+      password_length: 10,
+      uppercase: true,
+      lowercase: true,
+      numbers: true,
+      symbols: false,
+      is_deleted: false,
+      created: '',
+      updated: '',
+    },
+  ];
+  const queries = [];
+  globalThis.localStorage = {
+    getItem() { throw new Error('Cloud inspection must not read local storage'); },
+  };
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async (...args) => {
+      queries.push(args);
+      return records;
+    },
+  };
+
+  try {
+    const inspected = await cloudSync.listCloudInspectionRecords('seed');
+
+    assert.equal(inspected.length, 2);
+    assert.equal(inspected[0].baseWord, 'whatsapp');
+    assert.equal(inspected[0].comment, 'personal note');
+    assert.equal(inspected[0].logoFilename, 'whatsapp.png');
+    assert.equal(inspected[0].logoUrl, 'https://pocketbase.test/files/whatsapp.png');
+    assert.equal(inspected[0].logoExternalUrl, 'https://example.test/old-logo.png');
+    assert.equal(inspected[0].allowedSymbols, '!@');
+    assert.equal(inspected[0].deviceId, 'device-a');
+    assert.equal(inspected[1].logoUrl, 'https://cdn.example.test/netflix.png');
+    assert.match(queries[0][0].filter, /user_id = "account-a"/);
+    assert.deepEqual(globalThis.__cloudTest.writes, []);
+  } finally {
+    if (previousLocalStorage) Object.defineProperty(globalThis, 'localStorage', previousLocalStorage);
+    else delete globalThis.localStorage;
+  }
+});
+
+test('cloud database viewer has Logo first and exposes no record mutation controls', async () => {
+  const viewerSource = await readFile(new URL('../src/components/DatabaseViewerModal.tsx', import.meta.url), 'utf8');
+  assert.match(viewerSource, /const COLUMNS:[\s\S]*?\{ key: 'logo', label: 'Logo' \}/);
+  assert.match(viewerSource, /listCloudInspectionRecords\(seedWord, showDeleted\)/);
+  assert.doesNotMatch(viewerSource, /updateRecordFields|setRecordDeleted|\.create\(|\.update\(|\.delete\(/);
+  assert.doesNotMatch(viewerSource, /localStorage|sessionStorage|from ['"].*storage/);
+});
+
 test('stops an account A sync if identity changes while its query is pending', async () => {
   let releaseQuery;
   let queryStarted;
@@ -232,6 +355,326 @@ test('creates ordinary records with the captured owner identity', async () => {
   assert.equal(globalThis.__cloudTest.writes.length, 1);
   assert.equal(globalThis.__cloudTest.writes[0][0], 'create');
   assert.equal(globalThis.__cloudTest.writes[0][1].user_id, 'account-a');
+});
+
+test('does not reactivate a deleted record when an old local message is upserted', async () => {
+  const deleted = cloudRecord('deleted-id', { is_deleted: true });
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [deleted],
+  };
+
+  await assert.rejects(
+    cloudSync.upsertMessage(chatMessage('alpha', 'deleted-id'), 'seed', 'account-a'),
+    /paperera.*Restaura-la explícitament/i,
+  );
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('ordinary updates do not send or overwrite the deletion flag', async () => {
+  const active = cloudRecord('active-update');
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [active],
+    update: async (id, fields) => ({ ...active, id, ...fields }),
+  };
+
+  await cloudSync.upsertMessage(chatMessage('alpha', 'active-update'), 'seed', 'account-a');
+
+  const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
+  assert.equal(update[1], 'active-update');
+  assert.equal(Object.hasOwn(update[2], 'is_deleted'), false);
+});
+
+test('an old ID whose record changed base word is never redirected to another duplicate', async () => {
+  const changedRecord = cloudRecord('same-id', {
+    symbol: 'B',
+    encrypted_password: 'beta',
+  });
+  const oldDuplicate = cloudRecord('old-duplicate');
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [changedRecord, oldDuplicate],
+  };
+
+  await assert.rejects(
+    cloudSync.markMessageDeleted(chatMessage('alpha', 'same-id'), 'seed', 'account-a'),
+    /canviat de paraula base/,
+  );
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('saving a logo cannot reactivate a deleted record', async () => {
+  const deleted = cloudRecord('deleted-logo', { is_deleted: true });
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [deleted],
+  };
+
+  await assert.rejects(
+    cloudSync.saveMessageLogo(chatMessage('alpha', 'deleted-logo'), undefined, 'https://cdn.example/logo.png', 'seed', 'account-a'),
+    /és a la paperera/,
+  );
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('deletion uses the selected PocketBase ID when base words are duplicated', async () => {
+  const selected = cloudRecord('selected-id');
+  const duplicate = cloudRecord('duplicate-id', { password_length: 20 });
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [selected, duplicate],
+    update: async (id, fields) => ({ ...selected, id, ...fields }),
+  };
+
+  await cloudSync.markMessageDeleted(chatMessage('alpha', 'selected-id'), 'seed', 'account-a');
+
+  const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
+  assert.equal(update[1], 'selected-id');
+  assert.deepEqual(update[2], { is_deleted: true });
+});
+
+test('a local message with an ambiguous duplicate base word does not modify any remote record', async () => {
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [
+      cloudRecord('duplicate-one'),
+      cloudRecord('duplicate-two'),
+    ],
+  };
+
+  await assert.rejects(
+    cloudSync.markMessageDeleted(chatMessage('alpha', 'local-id'), 'seed', 'account-a'),
+    /inequívocament/,
+  );
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('the recycle bin queries only PocketBase and filters to deleted records owned by the current account', async () => {
+  const previousLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const queries = [];
+  globalThis.localStorage = {
+    getItem() { throw new Error('The recycle bin must not read local storage'); },
+  };
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async (...args) => {
+      queries.push(args);
+      return [
+        cloudRecord('deleted-owned', { is_deleted: true }),
+        cloudRecord('active-owned'),
+        cloudRecord('deleted-other', { user_id: 'account-b', is_deleted: true }),
+      ];
+    },
+  };
+
+  try {
+    const records = await cloudSync.listDeletedCloudRecords('seed');
+    assert.deepEqual(records.map(({ id }) => id), ['deleted-owned']);
+    assert.match(queries[0][0].filter, /user_id = "account-a".*is_deleted = true/);
+    assert.doesNotMatch(queries[0][0].filter, /is_deleted = false/);
+    assert.deepEqual(globalThis.__cloudTest.writes, []);
+    assert.doesNotMatch(recycleBinSource, /localStorage|sessionStorage|storage\.ts/);
+  } finally {
+    if (previousLocalStorage) Object.defineProperty(globalThis, 'localStorage', previousLocalStorage);
+    else delete globalThis.localStorage;
+  }
+});
+
+test('the recycle bin resolves external logos from logo_url when there is no uploaded file', async () => {
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [
+      cloudRecord('deleted-url-logo', {
+        is_deleted: true,
+        logo: null,
+        logo_url: 'https://cdn.example.test/removed-logo.png',
+      }),
+    ],
+  };
+
+  const [record] = await cloudSync.listDeletedCloudRecords('seed');
+  assert.equal(record.logoUrl, 'https://cdn.example.test/removed-logo.png');
+});
+
+test('restoring a deleted record changes only its deletion flag', async () => {
+  const deleted = cloudRecord('restore-id', { is_deleted: true });
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [deleted],
+    update: async (id, fields) => ({ ...deleted, id, ...fields }),
+  };
+
+  await cloudSync.restoreDeletedCloudRecord('restore-id');
+
+  const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
+  assert.equal(update[1], 'restore-id');
+  assert.deepEqual(update[2], { is_deleted: false });
+  assert.equal(deleted.encrypted_password, 'alpha');
+  assert.equal(deleted.encrypted_comment, 'private comment');
+  assert.equal(deleted.logo, 'logo.png');
+  assert.equal(deleted.password_length, 10);
+});
+
+test('a pending restore is stopped if the authenticated account changes before mutation', async () => {
+  let releaseQuery;
+  let queryStarted;
+  const started = new Promise((resolve) => { queryStarted = resolve; });
+  const pendingQuery = new Promise((resolve) => { releaseQuery = resolve; });
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => {
+      queryStarted();
+      return pendingQuery;
+    },
+  };
+
+  const pendingRestore = cloudSync.restoreDeletedCloudRecord('restore-pending');
+  await started;
+  globalThis.__cloudTest.user = { id: 'account-b' };
+  cloudSync.cancelCloudSyncRequests('account-a');
+  releaseQuery([cloudRecord('restore-pending', { is_deleted: true })]);
+
+  await assert.rejects(pendingRestore, /sessió del compte ha canviat/);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+  assert.equal(globalThis.__cloudTest.cancelled.length, 1);
+});
+
+test('permanent deletion is confirmed in the recycle-bin UI and calls PocketBase with the selected ID', async () => {
+  const deleted = cloudRecord('permanent-id', { is_deleted: true });
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [deleted],
+    delete: async () => true,
+  };
+
+  await cloudSync.permanentlyDeleteCloudRecord('permanent-id');
+
+  const deletion = globalThis.__cloudTest.writes.find(([method]) => method === 'delete');
+  assert.equal(deletion[1], 'permanent-id');
+  assert.match(recycleBinSource, /window\.confirm\(/);
+  assert.match(recycleBinSource, /permanentlyDeleteCloudRecord\(record\.id\)/);
+  assert.match(recycleBinSource, /Aquesta acció no es pot desfer/);
+});
+
+test('a permanent-delete permission error is shown and does not remove the trash record', async () => {
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [cloudRecord('cannot-delete', { is_deleted: true })],
+    delete: async () => { throw new Error('permission denied'); },
+  };
+
+  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('cannot-delete'), /permission denied/);
+  assert.match(recycleBinSource, /catch \(deleteError\)[\s\S]*setError/);
+  assert.match(recycleBinSource, /await permanentlyDeleteCloudRecord\(record\.id\)/);
+});
+
+test('a false PocketBase delete result is reported as a failure', async () => {
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [cloudRecord('delete-false', { is_deleted: true })],
+    delete: async () => false,
+  };
+
+  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('delete-false'), /no ha confirmat l’eliminació permanent/);
+});
+
+test('network or permission errors from deletion are propagated instead of reported as success', async () => {
+  const active = cloudRecord('network-delete');
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [active],
+    update: async () => { throw new Error('permission denied'); },
+  };
+
+  await assert.rejects(
+    cloudSync.markMessageDeleted(chatMessage('alpha', 'network-delete'), 'seed', 'account-a'),
+    /permission denied/,
+  );
+  assert.match(chatScreenSource, /catch \(deleteError\)[\s\S]*setCloudOperationError/);
+  assert.match(chatScreenSource, /if \(message\) await onCloudMessageDelete\?\.\(message\);[\s\S]*catch[\s\S]*return;/);
+});
+
+test('a pending delete is stopped if the authenticated account changes before mutation', async () => {
+  let releaseQuery;
+  let queryStarted;
+  const started = new Promise((resolve) => { queryStarted = resolve; });
+  const pendingQuery = new Promise((resolve) => { releaseQuery = resolve; });
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => {
+      queryStarted();
+      return pendingQuery;
+    },
+  };
+
+  const pendingDelete = cloudSync.markMessageDeleted(chatMessage('alpha', 'record-a'), 'seed', 'account-a');
+  await started;
+  globalThis.__cloudTest.user = { id: 'account-b' };
+  cloudSync.cancelCloudSyncRequests('account-a');
+  releaseQuery([cloudRecord('record-a')]);
+
+  await assert.rejects(pendingDelete, /sessió del compte ha canviat/);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+  assert.equal(globalThis.__cloudTest.cancelled.length, 1);
+});
+
+test('the normal cloud list and initial synchronization still omit deleted records', async () => {
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async (...args) => {
+      assert.match(args[0].filter, /is_deleted = false/);
+      return [cloudRecord('visible')];
+    },
+  };
+
+  const messages = await cloudSync.mergeLocalWithCloud('seed', true, 'account-a');
+
+  assert.deepEqual(messages.map(({ id }) => id), ['visible']);
+});
+
+test('active records cannot be permanently deleted from the recycle bin', async () => {
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [cloudRecord('active-id')],
+  };
+
+  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('active-id'), /és activa/);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
 });
 
 test('resolves direct HTTP(S) image URLs and known brand domains, rejecting invalid URL schemes', () => {

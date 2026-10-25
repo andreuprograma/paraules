@@ -33,6 +33,27 @@ export interface DecodedRecord {
   updated: string;
 }
 
+export interface CloudInspectionRecord {
+  id: string;
+  userId: string;
+  symbol: string;
+  baseWord: string;
+  comment: string;
+  logoFilename: string;
+  logoUrl?: string;
+  logoExternalUrl: string;
+  passwordLength: number;
+  uppercase: boolean;
+  lowercase: boolean;
+  numbers: boolean;
+  symbols: boolean;
+  allowedSymbols: string;
+  deviceId: string;
+  isDeleted: boolean;
+  created: string;
+  updated: string;
+}
+
 export async function listUserRecords(seedWord: string, includeDeleted = false): Promise<DecodedRecord[]> {
   const user = getCloudUser();
   if (!user) return [];
@@ -63,6 +84,45 @@ export async function listUserRecords(seedWord: string, includeDeleted = false):
   });
 }
 
+export async function listCloudInspectionRecords(
+  seedWord: string,
+  includeDeleted = false,
+): Promise<CloudInspectionRecord[]> {
+  const user = getCloudUser();
+  if (!user) throw new Error('Inicia sessió al núvol per consultar la base de dades.');
+  const userId = user.id;
+
+  const records = await withUserRequest(userId, (requestKey) =>
+    pb.collection(COLLECTION).getFullList<CloudPasswordRecord>({
+      filter: userRecordFilter(userId, includeDeleted),
+      sort: '-created',
+      requestKey,
+    }),
+  );
+  assertCurrentUser(userId);
+
+  return records
+    .filter((record) => record.user_id === userId)
+    .map((record) => inspectionFromRecord(record, seedWord));
+}
+
+export async function listDeletedCloudRecords(seedWord: string): Promise<CloudInspectionRecord[]> {
+  const user = getCloudUser();
+  if (!user) throw new Error('Inicia sessió al núvol per consultar la paperera.');
+  const userId = user.id;
+  const records = await withUserRequest(userId, (requestKey) =>
+    pb.collection(COLLECTION).getFullList<CloudPasswordRecord>({
+      filter: `${userRecordFilter(userId, true)} && is_deleted = true`,
+      sort: '-updated',
+      requestKey,
+    }),
+  );
+  assertCurrentUser(userId);
+  return records
+    .filter((record) => record.user_id === userId && record.is_deleted)
+    .map((record) => inspectionFromRecord(record, seedWord));
+}
+
 export async function updateRecordFields(
   recordId: string,
   fields: { comment?: string; baseWord?: string; options?: MessageOptions },
@@ -91,17 +151,6 @@ export async function updateRecordFields(
   assertCurrentUser(user.id);
   await withUserRequest(user.id, (requestKey) =>
     pb.collection(COLLECTION).update(recordId, update, { requestKey }),
-  );
-  assertCurrentUser(user.id);
-}
-
-export async function setRecordDeleted(recordId: string, deleted: boolean): Promise<void> {
-  const user = getCloudUser();
-  if (!user) return;
-  await assertRecordOwned(recordId, user.id);
-  assertCurrentUser(user.id);
-  await withUserRequest(user.id, (requestKey) =>
-    pb.collection(COLLECTION).update(recordId, { is_deleted: deleted }, { requestKey }),
   );
   assertCurrentUser(user.id);
 }
@@ -139,6 +188,44 @@ async function assertRecordOwned(recordId: string, userId: string): Promise<void
   if (!records.some((record) => record.id === recordId && record.user_id === userId)) {
     throw new Error('El registre no pertany al compte autenticat.');
   }
+}
+
+async function getOwnedRecord(recordId: string, userId: string): Promise<CloudPasswordRecord> {
+  assertCurrentUser(userId);
+  const records = await withUserRequest(userId, (requestKey) =>
+    pb.collection(COLLECTION).getFullList<CloudPasswordRecord>({
+      filter: `id = "${escapeFilterValue(recordId)}" && user_id = "${escapeFilterValue(userId)}"`,
+      requestKey,
+    }),
+  );
+  assertCurrentUser(userId);
+  const record = records.find((candidate) => candidate.id === recordId && candidate.user_id === userId);
+  if (!record) throw new Error('El registre no pertany al compte autenticat o ja no existeix.');
+  return record;
+}
+
+function inspectionFromRecord(record: CloudPasswordRecord, seedWord: string): CloudInspectionRecord {
+  const filename = Array.isArray(record.logo) ? record.logo[0] : record.logo || '';
+  return {
+    id: record.id,
+    userId: record.user_id,
+    symbol: record.symbol,
+    baseWord: decryptCloud(record.encrypted_password, seedWord),
+    comment: record.encrypted_comment ? decryptCloud(record.encrypted_comment, seedWord) : '',
+    logoFilename: filename,
+    logoUrl: filename ? pb.files.getURL(record, filename) : record.logo_url || undefined,
+    logoExternalUrl: record.logo_url || '',
+    passwordLength: record.password_length,
+    uppercase: record.uppercase,
+    lowercase: record.lowercase,
+    numbers: record.numbers,
+    symbols: record.symbols,
+    allowedSymbols: record.allowed_symbols || '',
+    deviceId: record.device_id || '',
+    isDeleted: record.is_deleted,
+    created: record.created,
+    updated: record.updated,
+  };
 }
 
 const pendingRequestsByUser = new Map<string, Set<string>>();
@@ -224,15 +311,14 @@ function userRecordFilter(userId: string, includeDeleted = false): string {
 // Identificació estable: busca un registre existent per paraula base desxifrada,
 // independentment del ciphertext. Filtra primer per symbol (primer caràcter,
 // determinista) per reduir el nombre de registres a desxifrar.
-async function findRecordByBaseWord(
+async function findRecordsByBaseWord(
   baseWord: string,
   seedWord: string,
   userId: string,
-  includeDeleted = false,
-): Promise<CloudPasswordRecord | null> {
+): Promise<CloudPasswordRecord[]> {
   assertCurrentUser(userId);
   const symbol = baseWord.charAt(0).toUpperCase();
-  const filter = `user_id = "${escapeFilterValue(userId)}" && symbol = "${escapeFilterValue(symbol)}"${includeDeleted ? '' : ' && is_deleted = false'}`;
+  const filter = `user_id = "${escapeFilterValue(userId)}" && symbol = "${escapeFilterValue(symbol)}"`;
   const records = await withUserRequest(userId, (requestKey) =>
     pb.collection(COLLECTION).getFullList<CloudPasswordRecord>({
       filter,
@@ -241,11 +327,44 @@ async function findRecordByBaseWord(
     }),
   );
   assertCurrentUser(userId);
-  for (const record of records.filter((record) => record.user_id === userId)) {
-    const decrypted = decryptCloud(record.encrypted_password, seedWord);
-    if (decrypted === baseWord) return record;
+  return records.filter((record) =>
+    record.user_id === userId && decryptCloud(record.encrypted_password, seedWord) === baseWord,
+  );
+}
+
+async function resolveRecordForMessage(
+  message: ChatMessage,
+  seedWord: string,
+  userId: string,
+): Promise<CloudPasswordRecord | null> {
+  assertCurrentUser(userId);
+  const recordsById = await withUserRequest(userId, (requestKey) =>
+    pb.collection(COLLECTION).getFullList<CloudPasswordRecord>({
+      filter: `id = "${escapeFilterValue(message.id)}"`,
+      requestKey,
+    }),
+  );
+  assertCurrentUser(userId);
+  const idMatch = recordsById.find((record) => record.id === message.id);
+  if (idMatch) {
+    if (idMatch.user_id !== userId) {
+      throw new Error('El registre identificat no pertany al compte autenticat.');
+    }
+    if (decryptCloud(idMatch.encrypted_password, seedWord) !== message.baseWord) {
+      throw new Error('La fitxa del núvol ha canviat de paraula base. No s’ha modificat cap registre.');
+    }
+    return idMatch;
   }
-  return null;
+
+  const matchingWord = await findRecordsByBaseWord(message.baseWord, seedWord, userId);
+  const matchingOptions = matchingWord.filter((record) =>
+    messageKey(message.baseWord, optionsFromRecord(record)) === messageKey(message.baseWord, message.options),
+  );
+  if (matchingOptions.length === 1) return matchingOptions[0];
+  if (matchingOptions.length > 1 || matchingWord.length > 1) {
+    throw new Error('No es pot identificar inequívocament la fitxa del núvol. No s’ha modificat cap registre.');
+  }
+  return matchingWord[0] ?? null;
 }
 
 function messageFromRecord(record: CloudPasswordRecord, seedWord: string, autoHide: boolean): ChatMessage | null {
@@ -310,14 +429,11 @@ export async function saveMessageLogo(
     if (!existingRecord) {
       throw new Error('No s’ha trobat una fitxa existent a PocketBase. Sincronitza la fitxa abans de desar-hi el logo.');
     }
+    if (existingRecord.is_deleted) {
+      throw new Error('La fitxa és a la paperera. Restaura-la abans de modificar-ne el logo.');
+    }
     assertCurrentUser(userId);
     await assertRecordOwned(existingRecord.id, userId);
-    if (existingRecord.is_deleted) {
-      assertCurrentUser(userId);
-      await withUserRequest(userId, (requestKey) =>
-        pb.collection(COLLECTION).update(existingRecord.id, { is_deleted: false }, { requestKey }),
-      );
-    }
 
     if (!file && logoUrl) {
       let parsedUrl: URL;
@@ -369,7 +485,7 @@ async function upsertMessageInternal(
   userId: string,
 ): Promise<void> {
   assertCurrentUser(userId);
-  const payload = {
+  const payload: Record<string, unknown> = {
     symbol: message.baseWord.charAt(0).toUpperCase(),
     encrypted_password: encryptCloud(message.baseWord, seedWord),
     encrypted_comment: message.comment ? encryptCloud(message.comment, seedWord) : '',
@@ -380,12 +496,14 @@ async function upsertMessageInternal(
     symbols: message.options.symbols,
     allowed_symbols: message.options.allowedSymbols || '',
     device_id: getDeviceId(),
-    is_deleted: false,
   };
 
-  const existing = await findRecordByBaseWord(message.baseWord, seedWord, userId, true);
+  const existing = await resolveRecordForMessage(message, seedWord, userId);
   assertCurrentUser(userId);
   if (existing) {
+    if (existing.is_deleted) {
+      throw new Error('La fitxa és a la paperera i no s’ha sincronitzat. Restaura-la explícitament abans de modificar-la.');
+    }
     await assertRecordOwned(existing.id, userId);
     assertCurrentUser(userId);
     await withUserRequest(userId, (requestKey) =>
@@ -394,7 +512,7 @@ async function upsertMessageInternal(
   } else {
     assertCurrentUser(userId);
     await withUserRequest(userId, (requestKey) =>
-      pb.collection(COLLECTION).create({ ...payload, user_id: userId }, { requestKey }),
+      pb.collection(COLLECTION).create({ ...payload, user_id: userId, is_deleted: false }, { requestKey }),
     );
   }
   assertCurrentUser(userId);
@@ -405,38 +523,56 @@ async function findRecordForMessage(
   seedWord: string,
   userId: string,
 ): Promise<CloudPasswordRecord | null> {
-  assertCurrentUser(userId);
-  const symbol = message.baseWord.charAt(0).toUpperCase();
-  const records = await withUserRequest(userId, (requestKey) =>
-    pb.collection(COLLECTION).getFullList<CloudPasswordRecord>({
-      filter: `user_id = "${escapeFilterValue(userId)}" && symbol = "${escapeFilterValue(symbol)}"`,
-      sort: '-updated',
-      requestKey,
-    }),
-  );
-  assertCurrentUser(userId);
-  const matchingWord = records.filter((record) =>
-    record.user_id === userId && decryptCloud(record.encrypted_password, seedWord) === message.baseWord,
-  );
-  const matchingOptions = matchingWord.find((record) => !record.is_deleted &&
-    messageKey(message.baseWord, optionsFromRecord(record)) === messageKey(message.baseWord, message.options),
-  ) ?? matchingWord.find((record) =>
-    messageKey(message.baseWord, optionsFromRecord(record)) === messageKey(message.baseWord, message.options),
-  );
-  return matchingOptions ?? matchingWord.find((record) => !record.is_deleted) ?? matchingWord[0] ?? null;
+  return resolveRecordForMessage(message, seedWord, userId);
 }
 
 export async function markMessageDeleted(message: ChatMessage, seedWord: string, userId: string): Promise<void> {
   assertCurrentUser(userId);
   await withSyncLock(async () => {
-    const existing = await findRecordByBaseWord(message.baseWord, seedWord, userId, true);
-    if (existing) {
-      await assertRecordOwned(existing.id, userId);
-      assertCurrentUser(userId);
-      await withUserRequest(userId, (requestKey) =>
-        pb.collection(COLLECTION).update(existing.id, { is_deleted: true }, { requestKey }),
-      );
+    const existing = await resolveRecordForMessage(message, seedWord, userId);
+    if (!existing) throw new Error('No s’ha trobat la fitxa del núvol. No s’ha eliminat cap registre.');
+    if (existing.is_deleted) throw new Error('La fitxa ja és a la paperera.');
+    await assertRecordOwned(existing.id, userId);
+    assertCurrentUser(userId);
+    const updated = await withUserRequest(userId, (requestKey) =>
+      pb.collection(COLLECTION).update<CloudPasswordRecord>(existing.id, { is_deleted: true }, { requestKey }),
+    );
+    assertCurrentUser(userId);
+    if (updated && (updated.id !== existing.id || updated.user_id !== userId || !updated.is_deleted)) {
+      throw new Error('PocketBase no ha confirmat l’eliminació de la fitxa seleccionada.');
     }
+  });
+}
+
+export async function restoreDeletedCloudRecord(recordId: string): Promise<void> {
+  const user = getCloudUser();
+  if (!user) throw new Error('Inicia sessió al núvol per restaurar la fitxa.');
+  await withSyncLock(async () => {
+    const record = await getOwnedRecord(recordId, user.id);
+    if (!record.is_deleted) throw new Error('La fitxa ja no és eliminada i no es pot restaurar des de la paperera.');
+    assertCurrentUser(user.id);
+    const restored = await withUserRequest(user.id, (requestKey) =>
+      pb.collection(COLLECTION).update<CloudPasswordRecord>(recordId, { is_deleted: false }, { requestKey }),
+    );
+    assertCurrentUser(user.id);
+    if (restored && (restored.id !== recordId || restored.user_id !== user.id || restored.is_deleted)) {
+      throw new Error('PocketBase no ha confirmat la restauració de la fitxa seleccionada.');
+    }
+  });
+}
+
+export async function permanentlyDeleteCloudRecord(recordId: string): Promise<void> {
+  const user = getCloudUser();
+  if (!user) throw new Error('Inicia sessió al núvol per eliminar la fitxa permanentment.');
+  await withSyncLock(async () => {
+    const record = await getOwnedRecord(recordId, user.id);
+    if (!record.is_deleted) throw new Error('La fitxa és activa i no es pot eliminar permanentment des de la paperera.');
+    assertCurrentUser(user.id);
+    const deleted = await withUserRequest(user.id, (requestKey) =>
+      pb.collection(COLLECTION).delete(recordId, { requestKey }),
+    );
+    assertCurrentUser(user.id);
+    if (!deleted) throw new Error('PocketBase no ha confirmat l’eliminació permanent de la fitxa.');
   });
 }
 

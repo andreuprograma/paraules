@@ -4,6 +4,7 @@ import { SavedSettings } from '@/lib/storage';
 import { Theme } from '@/lib/theme';
 import { getCloudUser } from '@/lib/pocketbase';
 import DatabaseViewerModal from './DatabaseViewerModal';
+import RecycleBinModal from './RecycleBinModal';
 
 interface OptionsPanelProps {
   open: boolean;
@@ -26,6 +27,7 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
   const [pinError, setPinError] = useState('');
   const [showPin, setShowPin] = useState(false);
   const [dbOpen, setDbOpen] = useState(false);
+  const [recycleBinOpen, setRecycleBinOpen] = useState(false);
 
   function update<K extends keyof SavedSettings>(key: K, value: SavedSettings[K]) {
     onChange({ ...settings, [key]: value });
@@ -208,6 +210,19 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
 
           <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
             <button
+              onClick={() => setRecycleBinOpen(true)}
+              disabled={!getCloudUser()}
+              className="mb-2 w-full h-12 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:bg-slate-100 dark:disabled:bg-slate-800/40 disabled:text-slate-400 dark:disabled:text-slate-600 disabled:cursor-not-allowed text-slate-900 dark:text-white font-medium text-[15px] transition-colors flex items-center justify-center gap-2"
+            >
+              <Trash2 className="w-4 h-4" />
+              Paperera de reciclatge
+            </button>
+            {!getCloudUser() && (
+              <p className="text-xs text-slate-400 dark:text-slate-500 mb-2 text-center">
+                Disponible només quan estàs loguejat al núvol.
+              </p>
+            )}
+            <button
               onClick={() => setDbOpen(true)}
               disabled={!getCloudUser()}
               className="w-full h-12 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:bg-slate-100 dark:disabled:bg-slate-800/40 disabled:text-slate-400 dark:disabled:text-slate-600 disabled:cursor-not-allowed text-slate-900 dark:text-white font-medium text-[15px] transition-colors flex items-center justify-center gap-2"
@@ -302,6 +317,12 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
         </div>
       )}
       <DatabaseViewerModal open={dbOpen} seedWord={seedWord} onClose={() => setDbOpen(false)} onRecordsChanged={onRecordsChanged} />
+      <RecycleBinModal
+        open={recycleBinOpen}
+        seedWord={seedWord}
+        onClose={() => setRecycleBinOpen(false)}
+        onRecordsChanged={onRecordsChanged}
+      />
     </>
   );
 }

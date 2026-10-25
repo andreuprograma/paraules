@@ -231,12 +231,18 @@ export default function App() {
       .catch(() => { if (getCloudUser()?.id === userId) setCloudStatus('error'); });
   }
 
-  function deleteCloudMessage(message: ChatMessage): void {
+  async function deleteCloudMessage(message: ChatMessage): Promise<void> {
     const userId = cloudUserId;
-    if (!userId || getCloudUser()?.id !== userId) return;
-    markMessageDeleted(message, seedWord, userId)
-      .then(() => { if (getCloudUser()?.id === userId) setCloudStatus('synced'); })
-      .catch(() => { if (getCloudUser()?.id === userId) setCloudStatus('error'); });
+    if (!userId) return;
+    if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat; no s’ha eliminat la fitxa.');
+    setCloudStatus('syncing');
+    try {
+      await markMessageDeleted(message, seedWord, userId);
+      if (getCloudUser()?.id === userId) setCloudStatus('synced');
+    } catch (error) {
+      if (getCloudUser()?.id === userId) setCloudStatus('error');
+      throw error;
+    }
   }
 
   async function saveCloudMessageLogo(message: ChatMessage, file: File | undefined, logoUrl: string | undefined): Promise<string | undefined> {

@@ -25,7 +25,7 @@ interface ChatScreenProps {
   cloudStatus: 'offline' | 'syncing' | 'synced' | 'error';
   onInitialSync?: (messages: ChatMessage[]) => Promise<ChatMessage[]>;
   onCloudMessageChange?: (message: ChatMessage) => void;
-  onCloudMessageDelete?: (message: ChatMessage) => void;
+  onCloudMessageDelete?: (message: ChatMessage) => Promise<void>;
   onCloudLogoChange?: (message: ChatMessage, file: File | undefined, logoUrl: string | undefined) => Promise<string | undefined>;
   cloudUserId: string | null;
   theme: Theme;
@@ -50,6 +50,7 @@ function highlightMessage(id: string, setHighlight: (id: string | null) => void)
 export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn, focusBaseWordOnMount, onInitialFocusComplete }: ChatScreenProps) {
   const [baseWord, setBaseWord] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>(() => getChatMessages(cloudUserId ?? undefined));
+  const [cloudOperationError, setCloudOperationError] = useState('');
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -201,9 +202,17 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     onCloudMessageChange?.(updatedMessage);
   }
 
-  function handleDelete(id: string) {
+  async function handleDelete(id: string): Promise<void> {
     const message = messages.find((item) => item.id === id);
-    if (message) onCloudMessageDelete?.(message);
+    setCloudOperationError('');
+    try {
+      if (message) await onCloudMessageDelete?.(message);
+    } catch (deleteError) {
+      setCloudOperationError(deleteError instanceof Error
+        ? deleteError.message
+        : 'No s’ha pogut eliminar la fitxa del núvol. La fitxa continua a la llista.');
+      return;
+    }
     setMessages((current) => current.filter((item) => item.id !== id));
     setExpandedMessageIds((current) => {
       const next = new Set(current);
@@ -446,6 +455,19 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
       </header>
 
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 overscroll-contain">
+        {cloudOperationError && (
+          <div role="alert" className="mx-auto mb-4 flex max-w-2xl items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/50 dark:text-red-300">
+            <span>{cloudOperationError}</span>
+            <button
+              type="button"
+              onClick={() => setCloudOperationError('')}
+              className="ml-auto shrink-0 underline"
+              aria-label="Tanca l’error"
+            >
+              Tanca
+            </button>
+          </div>
+        )}
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-6">
             <div className="w-14 h-14 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center justify-center mb-4">
@@ -475,7 +497,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                   createdAt={msg.createdAt}
                   updatedAt={msg.updatedAt}
                   onRegenerate={(options) => handleRegenerate(msg.id, options)}
-                  onDelete={() => handleDelete(msg.id)}
+                  onDelete={() => { void handleDelete(msg.id); }}
                   onSaveComment={(comment) => handleSaveComment(msg.id, comment)}
                   onSaveLogo={(logoUrl, file) => handleSaveLogo(msg.id, logoUrl, file)}
                   onHighlight={() => highlightMessage(msg.id, setHighlightId)}
