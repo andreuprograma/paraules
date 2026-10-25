@@ -298,6 +298,7 @@ export async function upsertMessage(message: ChatMessage, seedWord: string, user
 export async function saveMessageLogo(
   message: ChatMessage,
   file: File | undefined,
+  logoUrl: string | undefined,
   seedWord: string,
   userId: string,
 ): Promise<string | undefined> {
@@ -318,19 +319,36 @@ export async function saveMessageLogo(
       );
     }
 
+    if (!file && logoUrl) {
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(logoUrl);
+      } catch {
+        throw new Error('La URL del logotip no és vàlida.');
+      }
+      if (!['http:', 'https:'].includes(parsedUrl.protocol) || !parsedUrl.hostname || parsedUrl.username || parsedUrl.password) {
+        throw new Error('La URL del logotip ha de ser HTTP o HTTPS vàlida.');
+      }
+      assertCurrentUser(userId);
+      await withUserRequest(userId, (requestKey) =>
+        pb.collection(COLLECTION).update(existingRecord.id, { logo: [], logo_url: parsedUrl.href }, { requestKey }),
+      );
+      return parsedUrl.href;
+    }
     if (!file) {
       assertCurrentUser(userId);
       await withUserRequest(userId, (requestKey) =>
-        pb.collection(COLLECTION).update(existingRecord.id, { logo: [] }, { requestKey }),
+        pb.collection(COLLECTION).update(existingRecord.id, { logo: [], logo_url: '' }, { requestKey }),
       );
       return undefined;
     }
-    if (!file.type.startsWith('image/')) {
+    if (!file.type.startsWith('image/') || file.size === 0) {
       throw new Error('El fitxer del logotip no té un tipus MIME d’imatge vàlid.');
     }
 
     const formData = new FormData();
     formData.set('logo', file);
+    formData.set('logo_url', '');
     assertCurrentUser(userId);
     const updatedRecord = await withUserRequest(userId, (requestKey) =>
       pb.collection(COLLECTION).update<CloudPasswordRecord>(existingRecord.id, formData, { requestKey }),

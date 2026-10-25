@@ -1,14 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Copy, Check, Eye, EyeOff, RefreshCw, Trash2, MessageSquare, AlertTriangle, AlertCircle, KeyRound, ChevronDown, ChevronUp, Image } from 'lucide-react';
 import { estimateStrength } from '@/lib/passwordGenerator';
+import { resolveLogoInput } from '@/lib/logo';
 import { MessageOptions } from '@/lib/storage';
-
-const KNOWN_LOGO_DOMAINS: Record<string, string> = {
-  whatsapp: 'whatsapp.com',
-  netflix: 'netflix.com',
-  google: 'google.com',
-  caixabank: 'caixabank.es',
-};
 
 interface PasswordBubbleProps {
   messageId: string;
@@ -31,38 +25,6 @@ interface PasswordBubbleProps {
   onSaveComment: (comment: string) => void;
   onSaveLogo: (logoUrl: string | undefined, file?: File) => Promise<void>;
   onHighlight?: () => void;
-}
-
-const LOGO_MIME_EXTENSIONS: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'image/gif': 'gif',
-  'image/avif': 'avif',
-};
-
-async function downloadLogoFile(url: string, domain: string): Promise<File> {
-  let response: Response;
-  try {
-    response = await fetch(url);
-  } catch {
-    throw new Error('No s’ha pogut descarregar el logo. Logo.dev pot bloquejar la petició per CORS; no s’ha pujat cap fitxer. Caldria un proxy de servidor de confiança per descarregar-lo.');
-  }
-  if (!response.ok) {
-    throw new Error(`Logo.dev ha respost amb l’estat ${response.status}; no s’ha pujat cap fitxer.`);
-  }
-
-  const mimeType = (response.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
-  const extension = LOGO_MIME_EXTENSIONS[mimeType];
-  if (!extension) {
-    throw new Error(`Logo.dev ha retornat un tipus MIME no admès (${mimeType || 'absent'}); s’esperava una imatge PNG, JPEG, WebP, GIF o AVIF.`);
-  }
-
-  const blob = await response.blob();
-  if (blob.size === 0) {
-    throw new Error('Logo.dev ha retornat una imatge buida; no s’ha pujat cap fitxer.');
-  }
-  return new File([blob], `${domain.replace(/[^a-z0-9.-]/gi, '-')}.${extension}`, { type: mimeType });
 }
 
 function optionsEqual(a: MessageOptions, b: MessageOptions): boolean {
@@ -112,10 +74,13 @@ export default function PasswordBubble({
   const [logoLoading, setLogoLoading] = useState(false);
   const [logoSaving, setLogoSaving] = useState(false);
   const [logoResolvedDomain, setLogoResolvedDomain] = useState('');
+  const [logoFile, setLogoFile] = useState<File | undefined>();
+  const logoFileInputRef = useRef<HTMLInputElement>(null);
   const [collapsed, setCollapsed] = useState(!initiallyExpanded);
   const [regenerationOptions, setRegenerationOptions] = useState<MessageOptions>(options);
   const confirmRef = useRef<HTMLDivElement>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
+  const logoObjectUrlRef = useRef<string | null>(null);
   const canRegenerate = !optionsEqual(options, regenerationOptions);
 
   useEffect(() => {
@@ -125,6 +90,38 @@ export default function PasswordBubble({
   useEffect(() => {
     setRegenerationOptions(options);
   }, [options]);
+
+  useEffect(() => () => {
+    if (logoObjectUrlRef.current) URL.revokeObjectURL(logoObjectUrlRef.current);
+  }, []);
+
+  const setLogoPreview = useCallback((url: string, file?: File) => {
+    if (logoObjectUrlRef.current) {
+      URL.revokeObjectURL(logoObjectUrlRef.current);
+      logoObjectUrlRef.current = null;
+    }
+    if (url.startsWith('blob:')) logoObjectUrlRef.current = url;
+    setLogoPreviewUrl(url);
+    setLogoFile(file);
+    setLogoError('');
+    setLogoLoading(!!url);
+    setLogoResolvedDomain('');
+  }, []);
+
+  useEffect(() => {
+    if (!/^https?:\/\//i.test(logoQuery.trim())) return;
+    const timeout = window.setTimeout(() => {
+      try {
+        const resolved = resolveLogoInput(logoQuery, import.meta.env.VITE_LOGODEV_TOKEN || '');
+        setLogoPreview(resolved.url);
+        setLogoResolvedDomain(resolved.domain || '');
+      } catch (error) {
+        setLogoPreview('');
+        setLogoError(error instanceof Error ? error.message : 'No s’ha pogut validar la imatge.');
+      }
+    }, 300);
+    return () => window.clearTimeout(timeout);
+  }, [logoQuery, setLogoPreview]);
 
   useEffect(() => {
     if ((confirmOpen || deleteOpen) && confirmRef.current) {
@@ -225,55 +222,37 @@ export default function PasswordBubble({
 
   function previewLogo() {
     const input = logoQuery.trim();
-    setLogoError('');
-    setLogoPreviewUrl('');
-    setLogoLoading(false);
-    setLogoResolvedDomain('');
-
-    if (!input) {
-      setLogoError('Escriu el nom d’una marca coneguda o un domini.');
+    try {
+      const resolved = resolveLogoInput(input, import.meta.env.VITE_LOGODEV_TOKEN || '');
+      setLogoPreview(resolved.url);
+      setLogoResolvedDomain(resolved.domain || '');
+    } catch (error) {
+      setLogoPreview('');
+      setLogoError(error instanceof Error ? error.message : 'No s’ha pogut validar la imatge.');
       return;
     }
+  }
 
-    const normalizedBrand = input
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '');
-    const knownDomain = KNOWN_LOGO_DOMAINS[normalizedBrand];
-    const manualDomain = input
-      .replace(/^https?:\/\//i, '')
-      .replace(/^www\./i, '')
-      .split(/[/?#]/, 1)[0]
-      .toLowerCase();
-    const domain = knownDomain || (manualDomain.includes('.') ? manualDomain : '');
-
-    if (!domain || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) {
-      setLogoError('No tinc un domini conegut per a aquesta marca. Introdueix manualment el seu domini, per exemple marca.cat.');
+  function handleLogoFileChange(file?: File) {
+    if (!file) return;
+    if (!file.type.startsWith('image/') || file.size === 0) {
+      setLogoPreview('');
+      setLogoError('Selecciona un fitxer d’imatge vàlid i no buit.');
       return;
     }
-
-    const token = import.meta.env.VITE_LOGODEV_TOKEN;
-    if (!token) {
-      setLogoError('Falta VITE_LOGODEV_TOKEN a .env. Afegeix-hi el token públic de Logo.dev i reinicia Vite.');
-      return;
-    }
-
-    const params = new URLSearchParams({ token, size: '128', format: 'png' });
-    setLogoResolvedDomain(domain);
-    setLogoPreviewUrl(`https://img.logo.dev/${encodeURIComponent(domain)}?${params.toString()}`);
-    setLogoLoading(true);
+    setLogoQuery('');
+    const previewUrl = URL.createObjectURL(file);
+    setLogoPreview(previewUrl, file);
   }
 
   async function saveLogo() {
-    if (!logoPreviewUrl || !logoResolvedDomain) return;
+    if (!logoPreviewUrl || (!logoFile && !logoQuery.trim())) return;
     setLogoSaving(true);
     setLogoError('');
     try {
-      const file = await downloadLogoFile(logoPreviewUrl, logoResolvedDomain);
-      await onSaveLogo(logoPreviewUrl, file);
+      await onSaveLogo(logoPreviewUrl, logoFile);
       setLogoPanelOpen(false);
-      setLogoLoading(false);
+      if (logoFile && logoObjectUrlRef.current) setLogoPreview('');
     } catch (error) {
       setLogoError(error instanceof Error ? error.message : 'No s’ha pogut desar el logotip.');
     } finally {
@@ -286,10 +265,8 @@ export default function PasswordBubble({
     setLogoError('');
     try {
       await onSaveLogo(undefined);
-      setLogoPreviewUrl('');
+      setLogoPreview('');
       setLogoPanelOpen(false);
-      setLogoLoading(false);
-      setLogoResolvedDomain('');
     } catch (error) {
       setLogoError(error instanceof Error ? error.message : 'No s’ha pogut eliminar el logotip.');
     } finally {
@@ -321,18 +298,23 @@ export default function PasswordBubble({
           <div className="px-4 pb-4">
           {logoPanelOpen && (
             <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 p-3" onClick={(e) => e.stopPropagation()}>
-              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Marca coneguda o domini manual</label>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">URL d’imatge, marca coneguda o domini</label>
               <div className="flex gap-2">
-                <input value={logoQuery} onChange={(e) => { setLogoQuery(e.target.value); setLogoPreviewUrl(''); setLogoError(''); setLogoLoading(false); setLogoResolvedDomain(''); }} onKeyDown={(e) => { if (e.key === 'Enter') previewLogo(); }} placeholder="WhatsApp, Netflix o exemple.cat" className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-white" />
+                <input value={logoQuery} onChange={(e) => { setLogoQuery(e.target.value); setLogoPreview(''); }} onKeyDown={(e) => { if (e.key === 'Enter') previewLogo(); }} placeholder="https://exemple.cat/logo.png" className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-900 dark:text-white" />
                 <button type="button" onClick={previewLogo} className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-2 text-sm font-medium text-white">Previsualitza</button>
               </div>
-              <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">Es proven dominis coneguts per a algunes marques; no es fa una cerca general de marques a Logo.dev. Per a la resta, introdueix el domini oficial.</p>
+              <div className="mt-2 flex items-center gap-2">
+                <button type="button" onClick={() => logoFileInputRef.current?.click()} className="rounded-lg bg-slate-200 dark:bg-slate-700 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200">Tria un fitxer</button>
+                <input ref={logoFileInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => { handleLogoFileChange(event.target.files?.[0]); event.target.value = ''; }} />
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">També pots enganxar una URL HTTP o HTTPS.</span>
+              </div>
+              <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">Es proven dominis coneguts per a algunes marques; no es fa una cerca general de marques a Logo.dev.</p>
               {logoResolvedDomain && <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">Provant el domini <span className="font-mono">{logoResolvedDomain}</span>.</p>}
               {logoLoading && <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Carregant la previsualització…</p>}
               {logoError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{logoError}</p>}
               {logoPreviewUrl && <div className="mt-3 flex items-center gap-3">
-                <div className="w-14 h-14 rounded-lg bg-white border border-slate-200 flex items-center justify-center overflow-hidden shrink-0">{!logoError ? <img src={logoPreviewUrl} alt="Previsualització del logotip" className="w-full h-full object-contain" onLoad={() => setLogoLoading(false)} onError={() => { setLogoLoading(false); setLogoError(logoResolvedDomain ? `Logo.dev no ha pogut carregar una imatge per a ${logoResolvedDomain}. Comprova el domini, el token i la connexió.` : 'El logotip desat no s’ha pogut carregar. Torna a provar amb un domini correcte.'); }} /> : <span className="px-1 text-center text-[10px] leading-tight text-slate-500">No s’ha pogut carregar</span>}</div>
-                <div className="flex flex-wrap gap-2"><button type="button" onClick={() => void saveLogo()} disabled={!logoPreviewUrl || !logoResolvedDomain || logoLoading || logoSaving || !!logoError} className="rounded-lg bg-emerald-600 disabled:opacity-40 px-3 py-2 text-sm font-medium text-white">{logoSaving ? 'Desant…' : 'Desa el logotip'}</button><button type="button" onClick={() => void removeLogo()} disabled={logoSaving} className="rounded-lg bg-slate-200 dark:bg-slate-700 disabled:opacity-40 px-3 py-2 text-sm text-slate-700 dark:text-slate-200">Treu-lo</button></div>
+                <div className="w-14 h-14 rounded-lg bg-white border border-slate-200 flex items-center justify-center overflow-hidden shrink-0">{!logoError ? <img key={logoPreviewUrl} src={logoPreviewUrl} alt="Previsualització del logotip" className="w-full h-full object-contain" onLoad={() => setLogoLoading(false)} onError={() => { setLogoLoading(false); setLogoError(logoResolvedDomain ? `No s’ha pogut carregar el logo per al domini ${logoResolvedDomain}. Comprova el token i la connexió.` : 'No s’ha pogut carregar la imatge. Comprova que la URL sigui accessible i apunti a una imatge, o tria un altre fitxer.'); }} /> : <span className="px-1 text-center text-[10px] leading-tight text-slate-500">No s’ha pogut carregar</span>}</div>
+                <div className="flex flex-wrap gap-2"><button type="button" onClick={() => void saveLogo()} disabled={!logoPreviewUrl || (!logoFile && !logoQuery.trim()) || logoLoading || logoSaving || !!logoError} className="rounded-lg bg-emerald-600 disabled:opacity-40 px-3 py-2 text-sm font-medium text-white">{logoSaving ? 'Desant…' : 'Desa el logotip'}</button><button type="button" onClick={() => void removeLogo()} disabled={logoSaving} className="rounded-lg bg-slate-200 dark:bg-slate-700 disabled:opacity-40 px-3 py-2 text-sm text-slate-700 dark:text-slate-200">Treu-lo</button></div>
               </div>}
             </div>
           )}
@@ -456,7 +438,7 @@ export default function PasswordBubble({
             </button>
             <button
               type="button"
-              onClick={() => { setLogoPanelOpen((open) => !open); setLogoQuery(baseWord); setLogoPreviewUrl(logoUrl || ''); setLogoError(''); setLogoLoading(!!logoUrl); setLogoResolvedDomain(''); }}
+              onClick={() => { setLogoPanelOpen((open) => !open); setLogoQuery(''); setLogoPreview(logoUrl || ''); setLogoError(''); }}
               className={`box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg transition-colors ${logoPanelOpen || logoUrl ? 'bg-emerald-600 text-white dark:bg-emerald-700' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white'}`}
               aria-label="Logotip"
               title="Cerca o canvia el logotip"

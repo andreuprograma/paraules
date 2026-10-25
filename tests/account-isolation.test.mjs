@@ -23,6 +23,7 @@ const storageSource = await readFile(new URL('../src/lib/storage.ts', import.met
 const storage = await importSource(storageSource, 'storage.ts');
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const unlockScreenSource = await readFile(new URL('../src/components/UnlockScreen.tsx', import.meta.url), 'utf8');
+const chatScreenSource = await readFile(new URL('../src/components/ChatScreen.tsx', import.meta.url), 'utf8');
 const pinLockoutSource = await readFile(new URL('../src/lib/pinLockout.ts', import.meta.url), 'utf8');
 const pinLockout = await importSource(pinLockoutSource, 'pinLockout.ts');
 
@@ -42,10 +43,14 @@ const mockPocketBaseUrl = `data:text/javascript,
   export function getCloudUser() { return globalThis.__cloudTest.user; }
   export const pb = {
     cancelRequest: (...args) => globalThis.__cloudTest.cancelled.push(...args),
+    files: { getURL: (_record, filename) => 'https://pocketbase.test/files/' + filename },
     collection: () => ({
       getFullList: (...args) => globalThis.__cloudTest.getFullList(...args),
       create: (...args) => globalThis.__cloudTest.writes.push(['create', ...args]),
-      update: (...args) => globalThis.__cloudTest.writes.push(['update', ...args]),
+      update: async (...args) => {
+        globalThis.__cloudTest.writes.push(['update', ...args]);
+        return globalThis.__cloudTest.update?.(...args);
+      },
     }),
   };
 `;
@@ -56,6 +61,9 @@ cloudSource = transpileModule(cloudSource, 'cloudSync.ts')
   .replaceAll("'@/lib/passwordGenerator'", JSON.stringify(mockGeneratorUrl))
   .replaceAll("'@/lib/pocketbase'", JSON.stringify(mockPocketBaseUrl));
 const cloudSync = await import(`data:text/javascript;base64,${Buffer.from(cloudSource).toString('base64')}`);
+const logoSource = await readFile(new URL('../src/lib/logo.ts', import.meta.url), 'utf8');
+const logo = await importSource(logoSource, 'logo.ts');
+const passwordBubbleSource = await readFile(new URL('../src/components/PasswordBubble.tsx', import.meta.url), 'utf8');
 
 function installLocalStorage() {
   const values = new Map();
@@ -226,6 +234,107 @@ test('creates ordinary records with the captured owner identity', async () => {
   assert.equal(globalThis.__cloudTest.writes[0][1].user_id, 'account-a');
 });
 
+test('resolves direct HTTP(S) image URLs and known brand domains, rejecting invalid URL schemes', () => {
+  assert.equal(logo.resolveLogoInput(' https://cdn.example.test/logo.png ', 'token').url, 'https://cdn.example.test/logo.png');
+  assert.equal(logo.resolveLogoInput('WhatsApp', 'test-token').url, 'https://img.logo.dev/whatsapp.com?token=test-token&size=128&format=png');
+  assert.throws(() => logo.resolveLogoInput('javascript:alert(1)', 'test-token'), /domini conegut|URL completa/);
+  assert.throws(() => logo.resolveLogoInput('http://', 'test-token'), /URL no és vàlida/);
+  assert.throws(() => logo.resolveLogoInput('Netflix', ''), /VITE_LOGODEV_TOKEN/);
+  assert.match(passwordBubbleSource, /type="file" accept="image\/\*"/);
+  assert.match(passwordBubbleSource, /logoQuery\.trim\(\)[\s\S]*?setTimeout/);
+  assert.match(passwordBubbleSource, /resolveLogoInput\(logoQuery/);
+  assert.match(passwordBubbleSource, /onError=\{\(\) => \{ setLogoLoading\(false\); setLogoError\(/);
+  assert.doesNotMatch(passwordBubbleSource, /fetch\(/);
+});
+
+test('saves a URL in logo_url and clears the previous file field', async () => {
+  const record = {
+    id: 'record-a',
+    user_id: 'account-a',
+    symbol: 'A',
+    encrypted_password: 'alpha',
+    password_length: 10,
+    uppercase: true,
+    lowercase: true,
+    numbers: true,
+    symbols: false,
+    is_deleted: false,
+    logo: 'old-logo.png',
+    logo_url: '',
+  };
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [record],
+    update: async () => record,
+  };
+
+  const savedUrl = await cloudSync.saveMessageLogo(chatMessage('alpha'), undefined, 'https://cdn.example.test/new-logo.png', 'seed', 'account-a');
+  assert.equal(savedUrl, 'https://cdn.example.test/new-logo.png');
+  const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
+  assert.deepEqual(update[2], { logo: [], logo_url: 'https://cdn.example.test/new-logo.png' });
+  assert.match(passwordBubbleSource, /onSaveLogo\(logoPreviewUrl, logoFile\)/);
+  assert.match(passwordBubbleSource, /Treu-lo/);
+});
+
+test('uploads a selected local image as a file and clears the previous URL', async () => {
+  const record = {
+    id: 'record-a',
+    user_id: 'account-a',
+    symbol: 'A',
+    encrypted_password: 'alpha',
+    password_length: 10,
+    uppercase: true,
+    lowercase: true,
+    numbers: true,
+    symbols: false,
+    is_deleted: false,
+    logo: null,
+    logo_url: 'https://cdn.example.test/old-logo.png',
+  };
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [record],
+    update: async () => ({ ...record, logo: 'new-logo.png', logo_url: '' }),
+  };
+
+  const image = new Blob(['test-image'], { type: 'image/png' });
+  const savedUrl = await cloudSync.saveMessageLogo(chatMessage('alpha'), image, undefined, 'seed', 'account-a');
+  assert.equal(savedUrl, 'https://pocketbase.test/files/new-logo.png');
+  const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
+  assert.ok(update[2] instanceof FormData);
+  assert.equal(update[2].get('logo').type, 'image/png');
+  assert.equal(update[2].get('logo_url'), '');
+});
+
+test('restores file logos with priority, URL logos, and legacy locally saved logo URLs', async () => {
+  const records = [
+    { id: 'file', user_id: 'account-a', symbol: 'F', encrypted_password: 'file-brand', password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, logo: 'brand.png', logo_url: 'https://old.example/ignored.png', created: '', updated: '' },
+    { id: 'url', user_id: 'account-a', symbol: 'U', encrypted_password: 'url-brand', password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, logo: null, logo_url: 'https://cdn.example.test/url-logo.png', created: '', updated: '' },
+  ];
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => records,
+  };
+
+  const messages = await cloudSync.mergeLocalWithCloud('seed', true, 'account-a');
+  assert.deepEqual(messages.map(({ logoUrl }) => logoUrl), [
+    'https://pocketbase.test/files/brand.png',
+    'https://cdn.example.test/url-logo.png',
+  ]);
+  installLocalStorage();
+  storage.setChatMessages([chatMessage('legacy-url', 'legacy-id')].map((message) => ({
+    ...message,
+    logoUrl: 'https://legacy.example/logo.png',
+  })));
+  assert.equal(storage.getChatMessages()[0].logoUrl, 'https://legacy.example/logo.png');
+});
+
 test('applies every progressive lockout duration, including repeated 24-hour lockouts', () => {
   installLocalStorage();
   const durations = [60_000, 300_000, 900_000, 1_800_000, 3_600_000, 14_400_000, 86_400_000];
@@ -281,6 +390,31 @@ test('corrupted lockout state fails closed rather than allowing a PIN attempt', 
   localStorage.setItem('pwgen.pin_lockout', '{invalid');
   assert.throws(() => pinLockout.getPinLockoutStatus(), /estat de seguretat/);
   assert.equal(readPinSecurityStatusSource(), true);
+});
+
+test('focuses the PIN only when the field is enabled', () => {
+  assert.match(unlockScreenSource, /const canEnterPin = !!pinSecurity\.status && pinSecurity\.status\.remainingMs <= 0/);
+  assert.match(unlockScreenSource, /if \(!canEnterPin\) return;[\s\S]*input\??\.isConnected && !input\.disabled[\s\S]*input\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(unlockScreenSource, /ref=\{pinInputRef\}/);
+  assert.doesNotMatch(unlockScreenSource, /autoFocus/);
+});
+
+test('focuses the base-word input only on the first chat entry', () => {
+  assert.match(appSource, /if \(!hasOpenedChatRef\.current\)[\s\S]*setFocusBaseWordOnMount\(true\)/);
+  assert.match(chatScreenSource, /if \(!focusBaseWordOnMount\) return;[\s\S]*requestAnimationFrame[\s\S]*input\??\.isConnected && !input\.disabled[\s\S]*input\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(chatScreenSource, /onInitialFocusComplete\(\)/);
+  assert.doesNotMatch(chatScreenSource, /inputRef\.current\?\.select/);
+});
+
+test('keeps the chat mounted but hidden during PIN lock and restores focused field selection', () => {
+  assert.match(appSource, /chatSessionMounted && \([\s\S]*<div ref=\{chatContainerRef\} hidden=\{state === 'locked'\} aria-hidden=\{state === 'locked'\}>[\s\S]*<ChatScreen/);
+  assert.match(appSource, /const snapshot = captureFocusedElement\(chatContainerRef\.current\);[\s\S]*if \(snapshot\) focusSnapshotRef\.current = snapshot/);
+  assert.match(appSource, /snapshot\.element\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(appSource, /snapshot\.element\.setSelectionRange\([\s\S]*snapshot\.selectionStart[\s\S]*snapshot\.selectionEnd/);
+  assert.match(appSource, /document\.addEventListener\('visibilitychange', onVisibilityChange\)/);
+  assert.match(appSource, /window\.addEventListener\('blur', onWindowBlur\)/);
+  assert.match(appSource, /function onWindowBlur\(\) \{\s*rememberFocusedElement\(\);\s*\}/);
+  assert.match(appSource, /setSeedWord\(''\)[\s\S]*setState\('locked'\)/);
 });
 
 function readPinSecurityStatusSource() {

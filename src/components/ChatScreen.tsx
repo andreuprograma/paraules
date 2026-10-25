@@ -26,12 +26,14 @@ interface ChatScreenProps {
   onInitialSync?: (messages: ChatMessage[]) => Promise<ChatMessage[]>;
   onCloudMessageChange?: (message: ChatMessage) => void;
   onCloudMessageDelete?: (message: ChatMessage) => void;
-  onCloudLogoChange?: (message: ChatMessage, file: File | undefined) => Promise<string | undefined>;
+  onCloudLogoChange?: (message: ChatMessage, file: File | undefined, logoUrl: string | undefined) => Promise<string | undefined>;
   cloudUserId: string | null;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   onSignOut: () => void;
   onSignIn: () => void;
+  focusBaseWordOnMount: boolean;
+  onInitialFocusComplete: () => void;
 }
 
 type SortMode = 'created' | 'alpha';
@@ -45,7 +47,7 @@ function highlightMessage(id: string, setHighlight: (id: string | null) => void)
   window.setTimeout(() => setHighlight(null), 2200);
 }
 
-export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn }: ChatScreenProps) {
+export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn, focusBaseWordOnMount, onInitialFocusComplete }: ChatScreenProps) {
   const [baseWord, setBaseWord] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>(() => getChatMessages(cloudUserId ?? undefined));
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -67,6 +69,16 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   const inputRef = useRef<HTMLInputElement>(null);
   const initialSyncStartedRef = useRef(false);
   const sessionUserIdRef = useRef(cloudUserId);
+
+  useEffect(() => {
+    if (!focusBaseWordOnMount) return;
+    const frame = window.requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (input?.isConnected && !input.disabled) input.focus({ preventScroll: true });
+      onInitialFocusComplete();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusBaseWordOnMount, onInitialFocusComplete]);
 
   function scrollToMessage(id: string, center = false) {
     window.requestAnimationFrame(() => {
@@ -214,23 +226,17 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     if (!message) return;
     const updatedMessage = {
       ...message,
-      logoUrl: file ? sourceUrl : undefined,
+      logoUrl: sourceUrl,
       updatedAt: new Date().toISOString(),
     };
-    setMessages((current) => current.map((item) => item.id === id ? updatedMessage : item));
-    try {
-      const cloudLogoUrl = await onCloudLogoChange?.(updatedMessage, file);
-      if (file && cloudLogoUrl) {
-        setMessages((current) => current.map((item) =>
-          item.id === id ? { ...item, logoUrl: cloudLogoUrl } : item,
-        ));
-      }
-    } catch (error) {
-      setMessages((current) => current.map((item) =>
-        item.id === id ? { ...item, logoUrl: message.logoUrl } : item,
-      ));
-      throw error;
-    }
+    const savedLogoUrl = onCloudLogoChange
+      ? await onCloudLogoChange(updatedMessage, file, file ? undefined : sourceUrl)
+      : file
+        ? undefined
+        : sourceUrl;
+    setMessages((current) => current.map((item) =>
+      item.id === id ? { ...updatedMessage, logoUrl: savedLogoUrl } : item,
+    ));
   }
 
   function handleDefaultSettingsChange(nextSettings: SavedSettings) {

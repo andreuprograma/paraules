@@ -49,6 +49,8 @@ export default function UnlockScreen({ onUnlock, onResetLocalData }: UnlockScree
   const [error, setError] = useState('');
   const [pinSecurity, setPinSecurity] = useState<PinSecurityState>(readPinSecurityState);
   const persistenceFailureRef = useRef(false);
+  const pinInputRef = useRef<HTMLInputElement>(null);
+  const canEnterPin = !!pinSecurity.status && pinSecurity.status.remainingMs <= 0;
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -56,6 +58,12 @@ export default function UnlockScreen({ onUnlock, onResetLocalData }: UnlockScree
     }, 1000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!canEnterPin) return;
+    const input = pinInputRef.current;
+    if (input?.isConnected && !input.disabled) input.focus({ preventScroll: true });
+  }, [canEnterPin]);
 
   function handleUnlock() {
     setError('');
@@ -151,13 +159,13 @@ export default function UnlockScreen({ onUnlock, onResetLocalData }: UnlockScree
               <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">PIN</label>
               <div className="relative">
                 <input
+                  ref={pinInputRef}
                   type={showPin ? 'text' : 'password'}
                   value={pin}
                   onChange={(e) => setPin(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleUnlock()}
                   placeholder="Introdueix el PIN"
                   disabled={!pinSecurity.status || pinSecurity.status.remainingMs > 0}
-                  autoFocus
                   autoCapitalize="none"
                   autoCorrect="off"
                   autoComplete="off"

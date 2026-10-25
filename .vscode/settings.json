@@ -1,0 +1,11 @@
+{
+  "VsCodeTaskButtons.showCounter": false,
+  "VsCodeTaskButtons.tasks": [
+    {
+      "label": "$(cloud-upload) Publicar Paraules",
+      "task": "Publicar Paraules",
+      "alignment": "right",
+      "tooltip": "Executa les comprovacions i publica a origin/main amb confirmació"
+    }
+  ]
+}
