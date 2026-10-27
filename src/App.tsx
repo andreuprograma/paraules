@@ -54,7 +54,7 @@ function captureFocusedElement(container: HTMLElement | null): FocusSnapshot | n
 
 export default function App() {
   const [state, setState] = useState<AppState>('loading');
-  const [masterFormat, setMasterFormat] = useState<MasterFormat>(() => getMasterFormat());
+  const [, setMasterFormat] = useState<MasterFormat>(() => getMasterFormat());
   const [upgradingMaster, setUpgradingMaster] = useState(false);
   const [seedWord, setSeedWord] = useState('');
   const [chatSessionMounted, setChatSessionMounted] = useState(false);
@@ -359,14 +359,6 @@ export default function App() {
             onThemeChange={handleThemeChange}
             onSignOut={handleSignOut}
             onSignIn={handleSignIn}
-            onUpgradeMaster={() => {
-              setSeedWord('');
-              setChatSessionMounted(false);
-              hasOpenedChatRef.current = false;
-              setUpgradingMaster(true);
-              setState('setup');
-            }}
-            canUpgradeMaster={masterFormat === 'legacy'}
             focusBaseWordOnMount={focusBaseWordOnMount}
             onInitialFocusComplete={() => setFocusBaseWordOnMount(false)}
             cloudActionsEnabled={cloudActionsEnabled}

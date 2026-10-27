@@ -39,8 +39,6 @@ interface ChatScreenProps {
   onThemeChange: (theme: Theme) => void;
   onSignOut: () => void;
   onSignIn: () => void;
-  onUpgradeMaster: () => void;
-  canUpgradeMaster: boolean;
   focusBaseWordOnMount: boolean;
   onInitialFocusComplete: () => void;
   cloudActionsEnabled: boolean;
@@ -58,7 +56,7 @@ function highlightMessage(id: string, setHighlight: (id: string | null) => void)
   window.setTimeout(() => setHighlight(null), 2200);
 }
 
-export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn, onUpgradeMaster, canUpgradeMaster, focusBaseWordOnMount, onInitialFocusComplete, cloudActionsEnabled }: ChatScreenProps) {
+export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn, focusBaseWordOnMount, onInitialFocusComplete, cloudActionsEnabled }: ChatScreenProps) {
   const [baseWord, setBaseWord] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>(() => getChatMessages(cloudUserId ?? undefined));
   const [cloudOperationError, setCloudOperationError] = useState('');
@@ -703,17 +701,6 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
           <button onClick={() => setOptionsOpen(true)} className="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors" aria-label="Més opcions">
             <SlidersHorizontal className="w-5 h-5" />
           </button>
-          {canUpgradeMaster && (
-            <button
-              type="button"
-              onClick={onUpgradeMaster}
-              className="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/30"
-              aria-label="Actualitza la paraula mestra"
-              title="Actualitza a una paraula mestra completa"
-            >
-              <KeyRound className="w-5 h-5" />
-            </button>
-          )}
           {isCloudUser ? (
             <button onClick={onSignOut} className="w-10 h-10 shrink-0 flex items-center justify-center rounded-lg text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors" aria-label="Tanca la sessió" title="Tanca la sessió">
               <CloudOff className="w-5 h-5" />
