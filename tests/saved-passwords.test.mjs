@@ -336,3 +336,14 @@ test('settings show the logged-in email and the main screen counts visible Part 
   assert.match(chatScreenSource, /registre mostrat/);
   assert.match(chatScreenSource, /registres mostrats/);
 });
+
+test('switching cards with unsaved edits asks for confirmation before discarding', () => {
+  assert.match(chatScreenSource, /Canvis sense desar/);
+  assert.match(chatScreenSource, /Descarta els canvis/);
+  assert.match(chatScreenSource, /Continua editant/);
+  assert.match(chatScreenSource, /guardSwitch\(existing\?\.id \?\? null/);
+  assert.match(chatScreenSource, /guardSwitch\(s\.id/);
+  assert.match(chatScreenSource, /guardSwitch\(id, \(\) => performSearchSelect/);
+  assert.match(passwordBubbleSource, /guardSwitch\(messageId, apply\)/);
+  assert.match(savedPasswordCardsSource, /guardSwitch\(record\.id, apply\)/);
+});

@@ -28,6 +28,9 @@ interface SavedPasswordCardsProps {
   collapseAllSignal?: number;
   expandAllSignal?: number;
   onExpandedChange?: (id: string, expanded: boolean) => void;
+  guardSwitch?: (targetId: string | null, proceed: () => void) => void;
+  onDirtyChange?: (id: string, dirty: boolean) => void;
+  discardRequest?: { n: number; ids: string[] };
   highlightId?: string | null;
   expandId?: string | null;
   expandSignal?: number;
@@ -48,6 +51,10 @@ interface SavedPasswordCardProps {
   collapseAllSignal?: number;
   expandAllSignal?: number;
   onExpandedChange?: (id: string, expanded: boolean) => void;
+  guardSwitch?: (targetId: string | null, proceed: () => void) => void;
+  onDirtyChange?: (id: string, dirty: boolean) => void;
+  discardRequest?: { n: number; ids: string[] };
+  draftId?: string;
 }
 
 function formatDate(iso: string): string {
@@ -72,8 +79,14 @@ function SavedPasswordCard({
   collapseAllSignal = 0,
   expandAllSignal = 0,
   onExpandedChange,
+  guardSwitch,
+  onDirtyChange,
+  discardRequest,
+  draftId,
 }: SavedPasswordCardProps) {
   const isDraft = !record;
+  const cardId = record?.id ?? draftId ?? '';
+  const [original, setOriginal] = useState<{ details: SavedPasswordDetails; password: string } | null>(null);
   const [details, setDetails] = useState<SavedPasswordDetails>({ name: '', notes: '', icon: '🔐' });
   const [password, setPassword] = useState(initialPassword);
   const [expanded, setExpanded] = useState(isDraft);
@@ -123,9 +136,13 @@ function SavedPasswordCard({
   function toggleExpanded(): void {
     if (!record) return;
     const expanding = !expanded;
-    setExpanded(expanding);
-    setPasswordVisible(expanding ? true : !autoHide && passwordVisible);
-    onExpandedChange?.(record.id, expanding);
+    const apply = () => {
+      setExpanded(expanding);
+      setPasswordVisible(expanding ? true : !autoHide && passwordVisible);
+      onExpandedChange?.(record.id, expanding);
+    };
+    if (expanding && guardSwitch) guardSwitch(record.id, apply);
+    else apply();
   }
 
   useEffect(() => {
@@ -139,6 +156,7 @@ function SavedPasswordCard({
       if (!active) return;
       setDetails(nextDetails);
       setPassword(nextPassword);
+      setOriginal({ details: nextDetails, password: nextPassword });
       setLogoPreviewUrl(nextDetails.logoUrl ?? '');
       setError('');
     }).catch(() => {
@@ -147,6 +165,37 @@ function SavedPasswordCard({
 
     return () => { active = false; };
   }, [record, seedWord]);
+
+  const hasUnsavedChanges = record
+    ? !!original && (
+      details.name !== original.details.name ||
+      details.notes !== original.details.notes ||
+      details.icon !== original.details.icon ||
+      (details.logoUrl ?? '') !== (original.details.logoUrl ?? '') ||
+      password !== original.password
+    )
+    : details.name.trim() !== '' || details.notes !== '' || password !== initialPassword;
+
+  useEffect(() => {
+    if (cardId) onDirtyChange?.(cardId, hasUnsavedChanges);
+  }, [cardId, hasUnsavedChanges, onDirtyChange]);
+
+  useEffect(() => () => { if (cardId) onDirtyChange?.(cardId, false); }, [cardId, onDirtyChange]);
+
+  useEffect(() => {
+    if (!record || !original || !discardRequest || discardRequest.n === 0 || !discardRequest.ids.includes(record.id)) return;
+    setDetails(original.details);
+    setPassword(original.password);
+    setLogoPreviewUrl(original.details.logoUrl ?? '');
+    setEditingName(false);
+    setNotesOpen(false);
+    setLogoPanelOpen(false);
+    setRegenerationPanelOpen(false);
+    setSymbolsPanelOpen(false);
+    setConfirmDelete(false);
+    setError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discardRequest?.n]);
 
   const strength = estimateStrength(password);
   const strengthColors = ['bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-emerald-500'];
@@ -599,6 +648,9 @@ export default function SavedPasswordCards({
   collapseAllSignal = 0,
   expandAllSignal = 0,
   onExpandedChange,
+  guardSwitch,
+  onDirtyChange,
+  discardRequest,
   highlightId,
   expandId,
   expandSignal = 0,
@@ -623,6 +675,8 @@ export default function SavedPasswordCards({
           onConvertToPartA={onConvertToPartA}
           onCancelDraft={onCancelDraft}
           autoHide={autoHide}
+          onDirtyChange={onDirtyChange}
+          draftId={draft.id}
         />
       )}
       {activeRecords.map((record) => (
@@ -643,6 +697,9 @@ export default function SavedPasswordCards({
             collapseAllSignal={collapseAllSignal}
             expandAllSignal={expandAllSignal}
             onExpandedChange={onExpandedChange}
+            guardSwitch={guardSwitch}
+            onDirtyChange={onDirtyChange}
+            discardRequest={discardRequest}
             expandSignal={expandId === record.id ? expandSignal : 0}
           />
         </div>

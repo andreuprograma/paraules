@@ -36,6 +36,9 @@ interface PasswordBubbleProps {
   onSaveChanges: (changes: PasswordBubbleChanges) => Promise<void>;
   onDelete: () => void;
   onHighlight?: () => void;
+  guardSwitch?: (targetId: string | null, proceed: () => void) => void;
+  onDirtyChange?: (id: string, dirty: boolean) => void;
+  discardRequest?: { n: number; ids: string[] };
 }
 
 function optionsEqual(a: MessageOptions, b: MessageOptions): boolean {
@@ -70,6 +73,9 @@ export default function PasswordBubble({
   onSaveChanges,
   onDelete,
   onHighlight,
+  guardSwitch,
+  onDirtyChange,
+  discardRequest,
 }: PasswordBubbleProps) {
   const [visible, setVisible] = useState(initiallyExpanded || !autoHide);
   const [transientPassword, setTransientPassword] = useState('');
@@ -171,6 +177,28 @@ export default function PasswordBubble({
     ? pendingLogoChange.file ? pendingLogoChange.previewUrl : pendingLogoChange.logoUrl
     : logoUrl;
   const hasUnsavedChanges = commentDraft.trim() !== comment || !!pendingRegenerationOptions || !!pendingLogoChange;
+  useEffect(() => {
+    onDirtyChange?.(messageId, hasUnsavedChanges);
+  }, [hasUnsavedChanges, messageId, onDirtyChange]);
+
+  useEffect(() => () => onDirtyChange?.(messageId, false), [messageId, onDirtyChange]);
+
+  useEffect(() => {
+    if (!discardRequest || discardRequest.n === 0 || !discardRequest.ids.includes(messageId)) return;
+    setCommentDraft(comment);
+    setCommentOpen(false);
+    setPendingRegenerationOptions(null);
+    setRegenerationOptions(options);
+    setPendingLogoChange(null);
+    setLogoPreview('');
+    setLogoPanelOpen(false);
+    setSymbolsPanelOpen(false);
+    setConfirmOpen(false);
+    setTransientPassword('');
+    setSaveError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discardRequest?.n]);
+
   const strength = estimateStrength(displayedPassword);
   const strengthColors = ['bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-emerald-500'];
   const strengthText = ['text-red-600 dark:text-red-400', 'text-orange-600 dark:text-orange-400', 'text-yellow-600 dark:text-yellow-400', 'text-emerald-600 dark:text-emerald-400'];
@@ -245,14 +273,18 @@ export default function PasswordBubble({
 
   function toggleExpanded() {
     const expanding = collapsed;
-    setCollapsed(!collapsed);
-    if (expanding) {
-      setVisible(true);
-      onHighlight?.();
-    } else if (autoHide) {
-      setVisible(false);
-    }
-    onExpandedChange(messageId, expanding);
+    const apply = () => {
+      setCollapsed(!expanding);
+      if (expanding) {
+        setVisible(true);
+        onHighlight?.();
+      } else if (autoHide) {
+        setVisible(false);
+      }
+      onExpandedChange(messageId, expanding);
+    };
+    if (expanding && guardSwitch) guardSwitch(messageId, apply);
+    else apply();
   }
 
   function confirmDelete() {

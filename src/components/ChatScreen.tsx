@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Send, SlidersHorizontal, KeyRound, LockKeyhole, LogOut, Sparkles, Minus, Plus, RotateCcw, Search, ChevronsDownUp, ChevronsUpDown, ArrowUpDown, CloudOff, Cloud, ArrowUpAZ, ArrowDownAZ, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
 import { getCloudUser } from '@/lib/pocketbase';
 import type { PasswordEnvelopeV1 } from '@/lib/passwordEncryption';
@@ -82,6 +82,18 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   const [sortMode, setSortMode] = useState<SortMode>('alpha');
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const dirtyCardsRef = useRef(new Set<string>());
+  const [pendingSwitch, setPendingSwitch] = useState<{ ids: string[]; proceed: () => void } | null>(null);
+  const [discardRequest, setDiscardRequest] = useState<{ n: number; ids: string[] }>({ n: 0, ids: [] });
+  const reportDirty = useCallback((id: string, dirty: boolean) => {
+    if (dirty) dirtyCardsRef.current.add(id);
+    else dirtyCardsRef.current.delete(id);
+  }, []);
+  const guardSwitch = useCallback((targetId: string | null, proceed: () => void) => {
+    const ids = [...dirtyCardsRef.current].filter((id) => id !== targetId);
+    if (ids.length === 0) proceed();
+    else setPendingSwitch({ ids, proceed });
+  }, []);
   const [activeSuggestionIdx, setActiveSuggestionIdx] = useState(-1);
   const [globalControlsVisible, setGlobalControlsVisible] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -344,6 +356,10 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
       return;
     }
     const existing = messages.find((message) => message.baseWord === baseWord);
+    guardSwitch(existing?.id ?? null, () => performGenerate(existing));
+  }
+
+  function performGenerate(existing: ChatMessage | undefined) {
     setTypeFilter('all');
     if (existing) {
       setExpandOneId(existing.id);
@@ -438,6 +454,10 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   }
 
   function handleSearchSelect(id: string) {
+    guardSwitch(id, () => performSearchSelect(id));
+  }
+
+  function performSearchSelect(id: string) {
     setExpandOneId(id);
     setExpandOneSignal((n) => n + 1);
     setExpandedMessageIds((current) => new Set(current).add(id));
@@ -584,6 +604,10 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   function selectSuggestion(idx: number) {
     const s = suggestions[idx];
     if (!s) return;
+    guardSwitch(s.id, () => performSelectSuggestion(s));
+  }
+
+  function performSelectSuggestion(s: (typeof suggestions)[number]) {
     highlightMessage(s.id, setHighlightId);
     if (s.kind === 'B') {
       setSavedExpandId(s.id);
@@ -763,6 +787,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                 onConvertToPartA={handleConvertSavedPasswordToPartA}
                 onCancelDraft={() => setNewSavedPasswordDraft(null)}
                 autoHide={currentSettings.autoHide}
+                onDirtyChange={reportDirty}
               />
             )}
             {displayItems.map((item) => item.kind === 'A' ? (
@@ -788,6 +813,9 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                   onSaveChanges={(changes) => handleSaveMessageChanges(item.message.id, changes)}
                   onDelete={() => { void handleDelete(item.message.id); }}
                   onHighlight={() => highlightMessage(item.message.id, setHighlightId)}
+                  guardSwitch={guardSwitch}
+                  onDirtyChange={reportDirty}
+                  discardRequest={discardRequest}
                 />
               </div>
             ) : (
@@ -806,6 +834,9 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                 collapseAllSignal={collapseAllSignal}
                 expandAllSignal={expandAllSignal}
                 onExpandedChange={handleExpandedChange}
+                guardSwitch={guardSwitch}
+                onDirtyChange={reportDirty}
+                discardRequest={discardRequest}
                 highlightId={highlightId}
                 expandId={savedExpandId}
                 expandSignal={savedExpandSignal}
@@ -873,10 +904,10 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
           </button>
           <button
             type="button"
-            onClick={() => {
+            onClick={() => guardSwitch(null, () => {
               setTypeFilter('all');
               setNewSavedPasswordDraft({ id: crypto.randomUUID(), password: baseWord });
-            }}
+            })}
             className="w-12 h-12 flex-shrink-0 rounded-2xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 flex items-center justify-center transition-colors"
             aria-label="Desa a la Part B"
             title="Desa una contrasenya manualment a la Part B"
@@ -903,6 +934,44 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
         seedWord={seedWord}
         onRecordsChanged={reloadLocalMessages}
       />
+      {pendingSwitch && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" role="dialog" aria-modal="true" aria-labelledby="unsaved-title">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl dark:bg-slate-900">
+            <h2 id="unsaved-title" className="text-base font-semibold text-slate-900 dark:text-white">Canvis sense desar</h2>
+            <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
+              Tens canvis sense desar en una fitxa que estàs editant. Si continues, es perdran.
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                autoFocus
+                onClick={() => {
+                  const firstId = pendingSwitch.ids[0];
+                  setPendingSwitch(null);
+                  scrollToMessage(firstId, true);
+                  highlightMessage(firstId, setHighlightId);
+                }}
+                className="h-10 flex-1 rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-500"
+              >
+                Continua editant
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const { ids, proceed } = pendingSwitch;
+                  setPendingSwitch(null);
+                  if (newSavedPasswordDraft && ids.includes(newSavedPasswordDraft.id)) setNewSavedPasswordDraft(null);
+                  setDiscardRequest((current) => ({ n: current.n + 1, ids }));
+                  proceed();
+                }}
+                className="h-10 flex-1 rounded-lg bg-red-500 text-sm font-semibold text-white hover:bg-red-400"
+              >
+                Descarta els canvis
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <SearchModal open={searchOpen} messages={messages} onClose={() => setSearchOpen(false)} onSelect={handleSearchSelect} />
       <ImportExportModal open={importOpen} messages={messages} onImport={handleImport} onClose={() => setImportOpen(false)} />
     </div>

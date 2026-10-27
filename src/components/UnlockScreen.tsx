@@ -72,6 +72,7 @@ export default function UnlockScreen({ onUnlock, onResetLocalData, onReconfigure
 
   async function handleUnlock(): Promise<void> {
     setError('');
+    if (pin === '') return;
     const currentSecurity = readPinSecurityState();
     setPinSecurity(currentSecurity);
     if (!currentSecurity.status) {
@@ -246,7 +247,7 @@ export default function UnlockScreen({ onUnlock, onResetLocalData, onReconfigure
 
             <button
               onClick={handleUnlock}
-              disabled={busy || !pinSecurity.status || pinSecurity.status.remainingMs > 0}
+              disabled={busy || pin === '' || !pinSecurity.status || pinSecurity.status.remainingMs > 0}
               className="w-full h-12 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold text-[16px] transition-colors flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30"
             >
               <Lock className="w-5 h-5" />
