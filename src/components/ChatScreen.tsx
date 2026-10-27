@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Send, SlidersHorizontal, KeyRound, LockKeyhole, LogOut, Sparkles, Minus, Plus, RotateCcw, Search, ChevronsDownUp, ChevronsUpDown, ArrowUpDown, CloudOff, Cloud, ArrowUpAZ, ArrowDownAZ } from 'lucide-react';
+import { Send, SlidersHorizontal, KeyRound, LockKeyhole, LogOut, Sparkles, Minus, Plus, RotateCcw, Search, ChevronsDownUp, ChevronsUpDown, ArrowUpDown, CloudOff, Cloud, ArrowUpAZ, ArrowDownAZ, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
 import { getCloudUser } from '@/lib/pocketbase';
 import type { PasswordEnvelopeV1 } from '@/lib/passwordEncryption';
 import { decryptSavedPasswordDetails } from '@/lib/savedPasswordCrypto';
@@ -605,11 +605,26 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   }, [baseWord]);
 
   const isCloudUser = !!getCloudUser();
+  const hasSavedPasswords = savedPasswordRecords.some((record) => !record.deleted);
+  const combinedSync = (() => {
+    if (!cloudUserId || !cloudActionsEnabled) return null;
+    const states = [cloudStatus, ...(hasSavedPasswords ? [savedPasswordSyncState] : [])];
+    if (states.includes('error') || states.includes('conflict')) {
+      return { Icon: AlertTriangle, color: 'text-red-600 dark:text-red-400', label: 'Error de sincronització', spin: false };
+    }
+    if (states.includes('syncing')) {
+      return { Icon: RefreshCw, color: 'text-amber-600 dark:text-amber-300', label: 'Sincronitzant…', spin: true };
+    }
+    if (states.every((state) => state === 'synced')) {
+      return { Icon: CheckCircle2, color: 'text-emerald-600 dark:text-emerald-400', label: 'Sincronitzat', spin: false };
+    }
+    return { Icon: Cloud, color: 'text-slate-500', label: 'Sincronització pendent', spin: false };
+  })();
 
   return (
     <div className="flex flex-col h-screen [height:100dvh] bg-slate-50 dark:bg-slate-950 relative overflow-hidden">
       <header className="flex-shrink-0 bg-slate-50/95 dark:bg-slate-950/95 backdrop-blur border-b border-slate-200 dark:border-slate-800 px-4 h-14 flex items-center justify-between z-20">
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center">
             <KeyRound className="w-4 h-4 text-white" />
           </div>
@@ -619,19 +634,15 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
               {visibleRecordCount} {visibleRecordCount === 1 ? 'registre mostrat' : 'registres mostrats'}
             </p>
           </div>
-          {cloudStatus !== 'offline' && (
-            <span className={`text-[10px] ${cloudStatus === 'error' ? 'text-red-600 dark:text-red-400' : cloudStatus === 'syncing' ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-400'}`}>
-              {cloudStatus === 'error' ? 'Error de sync' : cloudStatus === 'syncing' ? 'Sync…' : 'Sincronitzat'}
-            </span>
-          )}
-          {savedPasswordRecords.some((record) => !record.deleted) && (
-            <span className={`text-[10px] ${savedPasswordSyncState === 'error' || savedPasswordSyncState === 'conflict' ? 'text-red-600 dark:text-red-400' : savedPasswordSyncState === 'syncing' ? 'text-amber-600 dark:text-amber-300' : savedPasswordSyncState === 'synced' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>
-              {savedPasswordSyncState === 'syncing' ? 'Desades: sync…' : savedPasswordSyncState === 'synced' ? 'Desades: sincronitzades' : savedPasswordSyncState === 'conflict' ? 'Desades: conflicte' : savedPasswordSyncState === 'error' ? 'Desades: pendents/error' : cloudUserId ? 'Desades: pendents' : 'Desades: locals'}
-            </span>
-          )}
-          {!cloudActionsEnabled && cloudUserId && (
-            <span className="text-[10px] text-amber-700 dark:text-amber-300">
-              Núvol pausat per protegir dades xifrades antigues
+          {combinedSync && (
+            <span
+              role="status"
+              title={combinedSync.label}
+              aria-label={combinedSync.label}
+              className={`flex shrink-0 items-center gap-1 text-[10px] ${combinedSync.color}`}
+            >
+              <combinedSync.Icon className={`h-4 w-4 ${combinedSync.spin ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{combinedSync.label}</span>
             </span>
           )}
         </div>
