@@ -21,7 +21,7 @@ export default function SearchModal({ open, messages, onClose, onSelect }: Searc
   }, [open]);
 
   const results = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
+    const normalized = query.toLowerCase();
     if (!normalized) return messages;
     return messages.filter((msg) =>
       msg.baseWord.toLowerCase().includes(normalized) ||
@@ -62,7 +62,7 @@ export default function SearchModal({ open, messages, onClose, onSelect }: Searc
         <div className="max-h-[50vh] overflow-y-auto">
           {results.length === 0 ? (
             <div className="py-12 text-center text-slate-400 dark:text-slate-500 text-sm">
-              {query.trim() ? 'No s\'han trobat coincidències.' : 'Encara no hi has generat cap contrasenya.'}
+              {query !== '' ? 'No s\'han trobat coincidències.' : 'Encara no hi has generat cap contrasenya.'}
             </div>
           ) : (
             <ul className="py-1">

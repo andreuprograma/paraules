@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import CryptoJS from 'crypto-js';
+import { webcrypto } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
+
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 function transpileModule(source, fileName) {
   return ts.transpileModule(source, {
@@ -22,24 +25,24 @@ async function importSource(source, fileName) {
 const storageSource = await readFile(new URL('../src/lib/storage.ts', import.meta.url), 'utf8');
 const storage = await importSource(storageSource, 'storage.ts');
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const optionsPanelSource = await readFile(new URL('../src/components/OptionsPanel.tsx', import.meta.url), 'utf8');
+const cloudReadDiagnosticsSource = await readFile(new URL('../src/components/CloudReadDiagnosticsModal.tsx', import.meta.url), 'utf8');
 const unlockScreenSource = await readFile(new URL('../src/components/UnlockScreen.tsx', import.meta.url), 'utf8');
 const chatScreenSource = await readFile(new URL('../src/components/ChatScreen.tsx', import.meta.url), 'utf8');
 const recycleBinSource = await readFile(new URL('../src/components/RecycleBinModal.tsx', import.meta.url), 'utf8');
 const pinLockoutSource = await readFile(new URL('../src/lib/pinLockout.ts', import.meta.url), 'utf8');
 const pinLockout = await importSource(pinLockoutSource, 'pinLockout.ts');
 
-const mockCryptoUrl = `data:text/javascript,export default {
-  SHA256: () => ({ toString: () => 'test-key' }),
-  AES: {
-    encrypt: (value) => ({ toString: () => value }),
-    decrypt: (value) => ({ toString: () => value }),
-  },
-  enc: { Utf8: {} },
-};`;
+globalThis.__cloudCryptoJS = CryptoJS;
+const mockCryptoUrl = 'data:text/javascript,export default globalThis.__cloudCryptoJS;';
 const mockGeneratorUrl = `data:text/javascript,
-  export const normalizeSeed = (seed) => seed;
+  export const normalizeSeed = (seed) => seed.trim().normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
   export const generatePassword = () => 'generated-password';
 `;
+const cloudCipherSource = await readFile(new URL('../src/lib/cloudCipher.ts', import.meta.url), 'utf8');
+const cloudCipherJavascript = transpileModule(cloudCipherSource, 'cloudCipher.ts');
+const cloudCipherUrl = `data:text/javascript;base64,${Buffer.from(cloudCipherJavascript).toString('base64')}`;
+const cloudCipher = await import(cloudCipherUrl);
 const mockPocketBaseUrl = `data:text/javascript,
   export function getCloudUser() { return globalThis.__cloudTest.user; }
   export const pb = {
@@ -47,7 +50,14 @@ const mockPocketBaseUrl = `data:text/javascript,
     files: { getURL: (_record, filename) => 'https://pocketbase.test/files/' + filename },
     collection: () => ({
       getFullList: (...args) => globalThis.__cloudTest.getFullList(...args),
-      create: (...args) => globalThis.__cloudTest.writes.push(['create', ...args]),
+      getList: (...args) => {
+        globalThis.__cloudTest.reads.push(args);
+        return globalThis.__cloudTest.getList(...args);
+      },
+      create: async (...args) => {
+        globalThis.__cloudTest.writes.push(['create', ...args]);
+        return globalThis.__cloudTest.create?.(...args);
+      },
       update: async (...args) => {
         globalThis.__cloudTest.writes.push(['update', ...args]);
         return globalThis.__cloudTest.update?.(...args);
@@ -64,6 +74,7 @@ let cloudSource = await readFile(new URL('../src/lib/cloudSync.ts', import.meta.
 cloudSource = transpileModule(cloudSource, 'cloudSync.ts')
   .replaceAll("'crypto-js'", JSON.stringify(mockCryptoUrl))
   .replaceAll("'@/lib/passwordGenerator'", JSON.stringify(mockGeneratorUrl))
+  .replaceAll("'@/lib/cloudCipher'", JSON.stringify(cloudCipherUrl))
   .replaceAll("'@/lib/pocketbase'", JSON.stringify(mockPocketBaseUrl));
 const cloudSync = await import(`data:text/javascript;base64,${Buffer.from(cloudSource).toString('base64')}`);
 const logoSource = await readFile(new URL('../src/lib/logo.ts', import.meta.url), 'utf8');
@@ -110,13 +121,26 @@ function chatMessage(baseWord, id = baseWord) {
   };
 }
 
+function legacyEncrypt(value, seed = 'seed') {
+  const normalizedSeed = seed.trim().normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const key = CryptoJS.SHA256(normalizedSeed).toString();
+  return CryptoJS.AES.encrypt(value, key).toString();
+}
+
+function asLegacyCipher(value) {
+  return value.startsWith('U2FsdGVkX1') ? value : legacyEncrypt(value);
+}
+
 function cloudRecord(id, overrides = {}) {
+  const baseWord = overrides.encrypted_password ?? 'alpha';
+  const comment = overrides.encrypted_comment ?? 'private comment';
   return {
     id,
     user_id: 'account-a',
-    symbol: 'A',
-    encrypted_password: 'alpha',
-    encrypted_comment: 'private comment',
+    type: 'A',
+    symbol: baseWord.charAt(0).toUpperCase(),
+    encrypted_password: asLegacyCipher(baseWord),
+    encrypted_comment: comment ? asLegacyCipher(comment) : '',
     password_length: 10,
     uppercase: true,
     lowercase: true,
@@ -130,6 +154,23 @@ function cloudRecord(id, overrides = {}) {
     created: '2025-01-01 00:00:00Z',
     updated: '2025-01-02 00:00:00Z',
     ...overrides,
+    encrypted_password: asLegacyCipher(baseWord),
+    encrypted_comment: comment ? asLegacyCipher(comment) : '',
+  };
+}
+
+async function versionedRecord(id, baseWord = 'alpha', overrides = {}) {
+  const resolvedBaseWord = overrides.encrypted_password ?? baseWord;
+  const resolvedComment = overrides.encrypted_comment ?? 'private comment';
+  const recordOverrides = { ...overrides };
+  delete recordOverrides.encrypted_password;
+  delete recordOverrides.encrypted_comment;
+  return {
+    ...cloudRecord(id, { ...recordOverrides, encrypted_password: resolvedBaseWord, encrypted_comment: resolvedComment }),
+    encrypted_password: await cloudCipher.encryptCloudValue(resolvedBaseWord, 'seed', 'account-a', 'base'),
+    encrypted_comment: resolvedComment === ''
+      ? ''
+      : await cloudCipher.encryptCloudValue(resolvedComment, 'seed', 'account-a', 'comment'),
   };
 }
 
@@ -155,6 +196,7 @@ test('local password reset removes all box data and account caches but preserves
     ['pwgen.chat', '[{"baseWord":"legacy"}]'],
     ['pwgen.chat.account-a', '[{"baseWord":"account-a"}]'],
     ['pwgen.chat.account-b', '[{"baseWord":"account-b"}]'],
+    ['pwgen.cloud_pending.example', 'pending'],
     ['pwgen.device_id', 'device-id'],
     ['pwgen.theme', 'dark'],
     ['pocketbase_auth', 'auth-state'],
@@ -170,6 +212,7 @@ test('local password reset removes all box data and account caches but preserves
     'pwgen.chat',
     'pwgen.chat.account-a',
     'pwgen.chat.account-b',
+    'pwgen.cloud_pending.example',
   ]) assert.equal(localStorage.getItem(key), null, `${key} should be removed`);
   assert.equal(localStorage.getItem('pwgen.device_id'), 'device-id');
   assert.equal(localStorage.getItem('pwgen.theme'), 'dark');
@@ -187,14 +230,16 @@ test('local password reset restores the previous local state if a removal fails'
   assert.equal(localStorage.getItem('pwgen.chat.account-a'), 'cached-data');
 });
 
-test('reset requires two explicit confirmations and returns to setup without cloud operations', () => {
-  assert.match(unlockScreenSource, /window\.confirm\(/);
-  assert.match(unlockScreenSource, /window\.prompt\(/);
-  assert.match(unlockScreenSource, /confirmation !== 'RESTABLIR'/);
-  assert.match(unlockScreenSource, /resetLocalPasswordData\(\)[\s\S]*onResetLocalData\(\)/);
+test('reset uses an in-app typed confirmation and returns to setup without cloud operations', () => {
+  assert.doesNotMatch(unlockScreenSource, /window\.(?:confirm|prompt)\(/);
+  assert.match(unlockScreenSource, /setResetConfirmationOpen\(true\)/);
+  assert.match(unlockScreenSource, /role="dialog"[\s\S]*aria-modal="true"/);
+  assert.match(unlockScreenSource, /value=\{resetConfirmation\}/);
+  assert.match(unlockScreenSource, /disabled=\{resetConfirmation !== 'RESTABLIR'\}/);
+  assert.match(unlockScreenSource, /if \(resetConfirmation !== 'RESTABLIR'\) return;[\s\S]*resetLocalPasswordData\(\);[\s\S]*onResetLocalData\(\)/);
   assert.doesNotMatch(storageSource, /pocketbase|fetch\(/i);
-  const resetHandler = unlockScreenSource.match(/function handleResetLocalData\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? '';
-  assert.doesNotMatch(resetHandler, /pb\.|cloudSync|fetch\(|signOut/);
+  const resetHandlers = unlockScreenSource.match(/function handleResetLocalData\(\) \{[\s\S]*?function confirmResetLocalData\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? '';
+  assert.doesNotMatch(resetHandlers, /pb\.|cloudSync|fetch\(|signOut/);
   assert.match(unlockScreenSource, /Restablir contrasenyes/);
   assert.match(appSource, /onResetLocalData=\{\(\) => \{[\s\S]*setSeedWord\(''\)[\s\S]*setDefaultSettings\(getDefaultSettings\(\)\)[\s\S]*setState\('setup'\)/);
 });
@@ -207,19 +252,217 @@ test('clears in-memory seed and remounts the message view when the account chang
 
 test('initial cloud loading returns only the authenticated owner records and never uploads local cache', async () => {
   const records = [
-    { id: 'a', user_id: 'account-a', symbol: 'A', encrypted_password: 'alpha', password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, created: '', updated: '' },
-    { id: 'b', user_id: 'account-b', symbol: 'B', encrypted_password: 'beta', password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, created: '', updated: '' },
+    { id: 'a', user_id: 'account-a', type: 'A', symbol: 'A', encrypted_password: legacyEncrypt('alpha'), password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, created: '', updated: '' },
+    { id: 'b', user_id: 'account-b', type: 'A', symbol: 'B', encrypted_password: legacyEncrypt('beta'), password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, created: '', updated: '' },
+    { id: 'part-b', user_id: 'account-a', type: 'B', encrypted_password: 'not-an-A-ciphertext' },
   ];
+  let queryFilter = '';
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
     cancelled: [],
-    getFullList: async () => records,
+    getFullList: async ({ filter }) => {
+      queryFilter = filter;
+      return records;
+    },
   };
 
   const messages = await cloudSync.mergeLocalWithCloud('seed', true, 'account-a');
   assert.deepEqual(messages.map(({ baseWord }) => baseWord), ['alpha']);
+  assert.match(queryFilter, /type = "A"/);
   assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('sync read errors are visible and authentication does not claim a paused sync succeeded', () => {
+  assert.match(chatScreenSource, /No s’ha pogut llegir ni fusionar les dades del núvol/);
+  assert.doesNotMatch(chatScreenSource, /\.catch\(\(\) => undefined\)/);
+  assert.match(appSource, /setCloudStatus\(cloudActionsEnabled \? 'synced' : 'offline'\)/);
+});
+
+test('cloud list and update helpers report missing authentication instead of succeeding silently', async () => {
+  globalThis.__cloudTest = {
+    user: null,
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [],
+  };
+
+  await assert.rejects(cloudSync.listUserRecords('seed'), /Inicia sessió al núvol/);
+  await assert.rejects(
+    cloudSync.updateRecordFields('record-id', { comment: 'updated' }, 'seed'),
+    /Inicia sessió al núvol/,
+  );
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('PocketBase diagnostic explicitly paginates twice and returns counts only', async () => {
+  const records = Array.from({ length: 101 }, (_, index) => ({
+    id: `record-${String(index).padStart(3, '0')}`,
+    user_id: 'account-a',
+    updated: `2026-01-${String((index % 28) + 1).padStart(2, '0')}`,
+    is_deleted: index % 2 === 0,
+  }));
+  const reads = [];
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    reads,
+    writes: [],
+    cancelled: [],
+    getList: async (page, perPage, options) => {
+      const start = (page - 1) * perPage;
+      return {
+        page,
+        perPage,
+        totalItems: records.length,
+        totalPages: Math.ceil(records.length / perPage),
+        items: records.slice(start, start + perPage),
+      };
+    },
+  };
+
+  const result = await cloudSync.runCloudReadDiagnostic();
+
+  assert.deepEqual(result, {
+    recordCount: 101,
+    firstReadPages: 2,
+    secondReadPages: 2,
+    uniqueRecordCount: 101,
+    repeatedReadStable: true,
+  });
+  assert.equal(reads.length, 4);
+  assert.deepEqual(reads.map(([page]) => page), [1, 2, 1, 2]);
+  for (const [, perPage, options] of reads) {
+    assert.equal(perPage, 100);
+    assert.equal(options.filter, 'user_id = "account-a"');
+    assert.equal(options.fields, 'id,user_id,updated,is_deleted');
+    assert.equal(options.sort, 'id');
+  }
+  assert.equal(globalThis.__cloudTest.writes.length, 0);
+  assert.equal(Object.keys(result).some((key) => /id|record/i.test(key) && !/count/i.test(key)), false);
+});
+
+test('PocketBase diagnostic reports no session instead of an empty collection', async () => {
+  globalThis.__cloudTest = { user: null, reads: [], writes: [], cancelled: [] };
+  await assert.rejects(
+    cloudSync.runCloudReadDiagnostic(),
+    (error) => error.code === 'AUTH_REQUIRED',
+  );
+  assert.deepEqual(globalThis.__cloudTest.reads, []);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('PocketBase diagnostic distinguishes an authenticated empty collection from errors', async () => {
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    reads: [],
+    writes: [],
+    cancelled: [],
+    getList: async (page) => ({ page, perPage: 100, totalItems: 0, totalPages: 0, items: [] }),
+  };
+
+  const result = await cloudSync.runCloudReadDiagnostic();
+
+  assert.equal(result.recordCount, 0);
+  assert.equal(result.uniqueRecordCount, 0);
+  assert.equal(result.repeatedReadStable, true);
+  assert.equal(globalThis.__cloudTest.reads.length, 2);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('PocketBase diagnostic classifies authentication, permission, and network read failures', async () => {
+  for (const [status, code] of [[401, 'AUTH_FAILED'], [403, 'PERMISSION_DENIED'], [0, 'NETWORK_ERROR']]) {
+    globalThis.__cloudTest = {
+      user: { id: 'account-a' },
+      reads: [],
+      writes: [],
+      cancelled: [],
+      getList: async () => {
+        const error = new Error('redacted request failure');
+        error.status = status;
+        throw error;
+      },
+    };
+    await assert.rejects(
+      cloudSync.runCloudReadDiagnostic(),
+      (error) => error.code === code && !error.message.includes('redacted request failure'),
+    );
+    assert.deepEqual(globalThis.__cloudTest.writes, []);
+  }
+});
+
+test('PocketBase diagnostic rejects foreign owners, repeated IDs, and inconsistent page totals', async () => {
+  const cases = [
+    {
+      code: 'FOREIGN_RECORD',
+      getList: async (page) => ({ page, perPage: 100, totalItems: 1, totalPages: 1, items: [
+        { id: 'opaque-id', user_id: 'account-b', updated: '', is_deleted: false },
+      ] }),
+    },
+    {
+      code: 'INCONSISTENT_RESULT',
+      getList: async (page) => ({ page, perPage: 100, totalItems: 2, totalPages: 1, items: [
+        { id: 'same-id', user_id: 'account-a', updated: '', is_deleted: false },
+        { id: 'same-id', user_id: 'account-a', updated: '', is_deleted: false },
+      ] }),
+    },
+    {
+      code: 'INCONSISTENT_RESULT',
+      getList: async (page) => ({ page, perPage: 100, totalItems: 2, totalPages: 1, items: [
+        { id: 'opaque-id', user_id: 'account-a', updated: '', is_deleted: false },
+      ] }),
+    },
+  ];
+
+  for (const testCase of cases) {
+    globalThis.__cloudTest = {
+      user: { id: 'account-a' },
+      reads: [],
+      writes: [],
+      cancelled: [],
+      getList: testCase.getList,
+    };
+    await assert.rejects(
+      cloudSync.runCloudReadDiagnostic(),
+      (error) => error.code === testCase.code,
+    );
+    assert.deepEqual(globalThis.__cloudTest.writes, []);
+  }
+});
+
+test('PocketBase diagnostic stops if the two complete reads differ', async () => {
+  let callCount = 0;
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    reads: [],
+    writes: [],
+    cancelled: [],
+    getList: async (page) => {
+      callCount += 1;
+      return {
+        page,
+        perPage: 100,
+        totalItems: 1,
+        totalPages: 1,
+        items: [{ id: 'opaque-id', user_id: 'account-a', updated: `revision-${callCount}`, is_deleted: false }],
+      };
+    },
+  };
+
+  await assert.rejects(
+    cloudSync.runCloudReadDiagnostic(),
+    (error) => error.code === 'INCONSISTENT_RESULT',
+  );
+  assert.equal(globalThis.__cloudTest.reads.length, 2);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('diagnostic UI compares the admin count and does not claim completeness without rules confirmation', () => {
+  assert.match(optionsPanelSource, /CloudReadDiagnosticsModal/);
+  assert.match(cloudReadDiagnosticsSource, /Recompte de registres del compte de prova/);
+  assert.match(cloudReadDiagnosticsSource, /He revisat per una via autoritzada/);
+  assert.match(cloudReadDiagnosticsSource, /no es podrà indicar que la lectura és completa/);
+  assert.match(cloudReadDiagnosticsSource, /No s’ha considerat el resultat com una llista buida/);
+  assert.match(appSource, /const cloudActionsEnabled = true/);
 });
 
 test('cloud database inspection is read-only and returns only authenticated PocketBase records with logo fields', async () => {
@@ -228,9 +471,10 @@ test('cloud database inspection is read-only and returns only authenticated Pock
     {
       id: 'owned',
       user_id: 'account-a',
+      type: 'A',
       symbol: 'W',
-      encrypted_password: 'whatsapp',
-      encrypted_comment: 'personal note',
+      encrypted_password: legacyEncrypt('whatsapp'),
+      encrypted_comment: legacyEncrypt('personal note'),
       logo: 'whatsapp.png',
       logo_url: 'https://example.test/old-logo.png',
       password_length: 14,
@@ -247,8 +491,9 @@ test('cloud database inspection is read-only and returns only authenticated Pock
     {
       id: 'not-owned',
       user_id: 'account-b',
+      type: 'A',
       symbol: 'N',
-      encrypted_password: 'other-account',
+      encrypted_password: legacyEncrypt('other-account'),
       password_length: 10,
       uppercase: true,
       lowercase: true,
@@ -261,8 +506,9 @@ test('cloud database inspection is read-only and returns only authenticated Pock
     {
       id: 'url-only',
       user_id: 'account-a',
+      type: 'A',
       symbol: 'N',
-      encrypted_password: 'netflix',
+      encrypted_password: legacyEncrypt('netflix'),
       logo: '',
       logo_url: 'https://cdn.example.test/netflix.png',
       password_length: 10,
@@ -344,6 +590,7 @@ test('stops an account A sync if identity changes while its query is pending', a
 });
 
 test('creates ordinary records with the captured owner identity', async () => {
+  installLocalStorage();
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -355,10 +602,309 @@ test('creates ordinary records with the captured owner identity', async () => {
   assert.equal(globalThis.__cloudTest.writes.length, 1);
   assert.equal(globalThis.__cloudTest.writes[0][0], 'create');
   assert.equal(globalThis.__cloudTest.writes[0][1].user_id, 'account-a');
+  assert.equal(globalThis.__cloudTest.writes[0][1].type, 'A');
+});
+
+test('new cloud records preserve exact Unicode bases and never send generated passwords', async () => {
+  installLocalStorage();
+  const baseWord = ' Google🚀Goo$gle! ';
+  const message = chatMessage(baseWord, 'local-message');
+  message.password = 'generated-password-must-not-leave-device';
+  const records = [];
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => records,
+    create: async (payload) => {
+      records.push({ ...payload, id: 'remote-message', created: '', updated: '' });
+      return records.at(-1);
+    },
+  };
+
+  await cloudSync.upsertMessage(message, 'seed', 'account-a');
+
+  const [, payload] = globalThis.__cloudTest.writes[0];
+  assert.equal(payload.symbol, ' ');
+  assert.match(payload.encrypted_password, /^paraules:v2:/);
+  assert.equal(Object.hasOwn(payload, 'password'), false);
+  assert.equal(JSON.stringify(payload).includes(message.password), false);
+  assert.equal(await cloudCipher.decryptCloudValue(payload.encrypted_password, 'seed', 'account-a', 'base'), baseWord);
+  const merged = await cloudSync.mergeLocalWithCloud('seed', true, 'account-a');
+  assert.equal(merged[0].baseWord, baseWord);
+  assert.equal(Object.hasOwn(merged[0], 'password'), false);
+});
+
+test('symbol remains an auxiliary value for spaces, emoji, symbols, and Unicode expansions', async () => {
+  installLocalStorage();
+  const records = [];
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => records,
+    create: async (payload) => {
+      records.push({ ...payload, id: `record-${records.length}`, created: '', updated: '' });
+      return records.at(-1);
+    },
+  };
+
+  for (const baseWord of [' Google🚀 ', '🚀base', '!base', 'ßeta']) {
+    await cloudSync.upsertMessage(chatMessage(baseWord), 'seed', 'account-a');
+    const record = records.at(-1);
+    assert.equal(
+      await cloudCipher.decryptCloudValue(record.encrypted_password, 'seed', 'account-a', 'base'),
+      baseWord,
+    );
+  }
+
+  assert.deepEqual(records.map(({ symbol }) => symbol), [' ', '🚀', '!', 'SS']);
+  assert.equal(globalThis.__cloudTest.writes.filter(([method]) => method === 'create').length, 4);
+});
+
+test('v2 ciphertext and text fields exceeding the assumed 5000-character limit are rejected before writes', async () => {
+  installLocalStorage();
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [],
+  };
+
+  await assert.rejects(
+    cloudSync.upsertMessage(chatMessage('a'.repeat(3800)), 'seed', 'account-a'),
+    /encrypted_password.*5000/i,
+  );
+  const longComment = chatMessage('short-base');
+  longComment.comment = 'c'.repeat(3800);
+  await assert.rejects(
+    cloudSync.upsertMessage(longComment, 'seed', 'account-a'),
+    /encrypted_comment.*5000/i,
+  );
+  const longAllowedSymbols = chatMessage('another-base');
+  longAllowedSymbols.options.allowedSymbols = '!'.repeat(5001);
+  await assert.rejects(
+    cloudSync.upsertMessage(longAllowedSymbols, 'seed', 'account-a'),
+    /allowed_symbols.*5000/i,
+  );
+
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('legacy ciphertext remains readable with its original normalized key and is rewritten as v2 on update', async () => {
+  installLocalStorage();
+  const legacy = cloudRecord('legacy', {
+    symbol: ' ',
+    encrypted_password: legacyEncrypt('  Google🚀 '),
+    encrypted_comment: legacyEncrypt(' nota antiga '),
+  });
+  const originalPasswordCiphertext = legacy.encrypted_password;
+  const originalCommentCiphertext = legacy.encrypted_comment;
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [legacy],
+  };
+
+  const [message] = await cloudSync.mergeLocalWithCloud('Sëed🚀', true, 'account-a');
+  assert.equal(message.baseWord, '  Google🚀 ');
+  assert.equal(message.comment, ' nota antiga ');
+  assert.equal(Object.hasOwn(message, 'password'), false);
+  await cloudSync.upsertMessage(chatMessage('  Google🚀 ', 'legacy'), 'Sëed🚀', 'account-a');
+  assert.equal(globalThis.__cloudTest.writes.length, 1);
+  assert.equal(globalThis.__cloudTest.writes[0][0], 'update');
+  assert.match(globalThis.__cloudTest.writes[0][2].encrypted_password, /^paraules:v2:/);
+  assert.notEqual(globalThis.__cloudTest.writes[0][2].encrypted_password, originalPasswordCiphertext);
+  assert.equal(originalCommentCiphertext.length > 0, true);
+});
+
+test('exact base matching distinguishes case, symbols, and edge spaces during updates', async () => {
+  installLocalStorage();
+  const records = [
+    await versionedRecord('upper', 'Google'),
+    await versionedRecord('lower', 'google'),
+    await versionedRecord('spaced', 'Google '),
+  ];
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => records,
+    update: async (id, fields) => ({ ...records.find((record) => record.id === id), ...fields }),
+  };
+
+  await cloudSync.upsertMessage(chatMessage('Google', 'local-id'), 'seed', 'account-a');
+
+  const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
+  assert.equal(update[1], 'upper');
+  assert.equal(globalThis.__cloudTest.writes.filter(([method]) => method === 'create').length, 0);
+});
+
+test('a timed-out create that committed is found on retry instead of duplicated', async () => {
+  installLocalStorage();
+  const records = [];
+  let firstCreate = true;
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => records,
+    create: async (payload) => {
+      const record = { ...payload, id: 'remote-after-timeout', created: '', updated: '' };
+      records.push(record);
+      if (firstCreate) {
+        firstCreate = false;
+        throw new Error('network timeout after server commit');
+      }
+      return record;
+    },
+    update: async (id, fields) => ({ ...records.find((record) => record.id === id), ...fields }),
+  };
+
+  const message = chatMessage('retry-base', 'local-retry');
+  await assert.rejects(cloudSync.upsertMessage(message, 'seed', 'account-a'), /network timeout/);
+  await cloudSync.upsertMessage(message, 'seed', 'account-a');
+
+  assert.equal(globalThis.__cloudTest.writes.filter(([method]) => method === 'create').length, 1);
+  assert.equal(globalThis.__cloudTest.writes.filter(([method]) => method === 'update').length, 1);
+});
+
+test('an ambiguous failed create without a visible record stays blocked on retry', async () => {
+  installLocalStorage();
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [],
+    create: async () => { throw new Error('network timeout'); },
+  };
+  const message = chatMessage('uncertain-base', 'local-uncertain');
+
+  await assert.rejects(cloudSync.upsertMessage(message, 'seed', 'account-a'), /network timeout/);
+  await assert.rejects(cloudSync.upsertMessage(message, 'seed', 'account-a'), /resultat d’una creació anterior és incert/);
+  assert.equal(globalThis.__cloudTest.writes.filter(([method]) => method === 'create').length, 1);
+});
+
+test('HTTP timeout and throttling responses preserve the uncertain-create retry marker', async () => {
+  const mockStorage = installLocalStorage();
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [],
+    create: async () => {
+      const error = new Error('request timeout');
+      error.status = 408;
+      throw error;
+    },
+  };
+  const message = chatMessage('uncertain-http-base');
+
+  await assert.rejects(cloudSync.upsertMessage(message, 'seed', 'account-a'), /request timeout/);
+  assert.equal([...mockStorage.values.keys()].some((key) => key.startsWith('pwgen.cloud_pending.')), true);
+  await assert.rejects(cloudSync.upsertMessage(message, 'seed', 'account-a'), /resultat d’una creació anterior és incert/);
+  assert.equal(globalThis.__cloudTest.writes.filter(([method]) => method === 'create').length, 1);
+});
+
+test('network and permission failures while reading never become an empty-list create', async () => {
+  installLocalStorage();
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => { throw new Error('network timeout while listing'); },
+  };
+
+  await assert.rejects(cloudSync.upsertMessage(chatMessage('base'), 'seed', 'account-a'), /network timeout/);
+  globalThis.__cloudTest.getFullList = async () => {
+    const error = new Error('permission denied while listing');
+    error.status = 403;
+    throw error;
+  };
+  await assert.rejects(cloudSync.upsertMessage(chatMessage('base'), 'seed', 'account-a'), /permission denied/);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('permission rejection from create is surfaced and does not leave an uncertain retry marker', async () => {
+  const mockStorage = installLocalStorage();
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [],
+    create: async () => {
+      const error = new Error('permission denied');
+      error.status = 403;
+      throw error;
+    },
+  };
+
+  await assert.rejects(cloudSync.upsertMessage(chatMessage('permission-base'), 'seed', 'account-a'), /permission denied/);
+  assert.equal([...mockStorage.values.keys()].some((key) => key.startsWith('pwgen.cloud_pending.')), false);
+  assert.equal(globalThis.__cloudTest.writes.filter(([method]) => method === 'create').length, 1);
+});
+
+test('a successful cloud read preserves unmatched local messages and legacy passwords', async () => {
+  const localMessage = chatMessage('local-only');
+  localMessage.password = 'legacy-local-password';
+  const matchingLocalMessage = chatMessage('same-base', 'local-id');
+  matchingLocalMessage.password = 'legacy-cached-password';
+  const records = [
+    await versionedRecord('remote-match', 'same-base'),
+    await versionedRecord('remote-only', 'remote-only'),
+  ];
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => records,
+  };
+
+  const merged = await cloudSync.mergeLocalWithCloud(
+    'seed',
+    true,
+    'account-a',
+    [localMessage, matchingLocalMessage],
+  );
+  assert.deepEqual(merged.map(({ baseWord }) => baseWord), ['local-only', 'same-base', 'remote-only']);
+  assert.equal(merged[0].password, 'legacy-local-password');
+  assert.equal(merged[1].password, 'legacy-cached-password');
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('modified v2 ciphertext and a different master are reported as decryption failures', async () => {
+  const valid = await versionedRecord('tampered', 'Unicode 🚀 ');
+  const cloudCipherPrefix = 'paraules:v2:';
+  const envelopeBytes = Buffer.from(valid.encrypted_password.slice(cloudCipherPrefix.length), 'base64url');
+  envelopeBytes[envelopeBytes.length - 1] ^= 0x01;
+  valid.encrypted_password = cloudCipherPrefix + envelopeBytes.toString('base64url');
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => [valid],
+  };
+
+  await assert.rejects(cloudSync.mergeLocalWithCloud('seed', true, 'account-a'), /autenticar|desxifrar/);
+  const untouched = await versionedRecord('wrong-master', 'base');
+  globalThis.__cloudTest.getFullList = async () => [untouched];
+  await assert.rejects(cloudSync.mergeLocalWithCloud('different full master', true, 'account-a'), /autenticar|desxifrar/);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('v2 ciphertext uses fresh nonces and is bound to the account and field', async () => {
+  const first = await cloudCipher.encryptCloudValue(' Google 🚀 ', 'Mäster🚀', 'account-a', 'base');
+  const second = await cloudCipher.encryptCloudValue(' Google 🚀 ', 'Mäster🚀', 'account-a', 'base');
+  assert.notEqual(first, second);
+  assert.equal(await cloudCipher.decryptCloudValue(first, 'Mäster🚀', 'account-a', 'base'), ' Google 🚀 ');
+  await assert.rejects(cloudCipher.decryptCloudValue(first, 'Mäster🚀', 'account-b', 'base'));
+  await assert.rejects(cloudCipher.decryptCloudValue(first, 'Mäster🚀', 'account-a', 'comment'));
 });
 
 test('does not reactivate a deleted record when an old local message is upserted', async () => {
-  const deleted = cloudRecord('deleted-id', { is_deleted: true });
+  installLocalStorage();
+  const deleted = await versionedRecord('deleted-id', 'alpha', { is_deleted: true });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -374,7 +920,8 @@ test('does not reactivate a deleted record when an old local message is upserted
 });
 
 test('ordinary updates do not send or overwrite the deletion flag', async () => {
-  const active = cloudRecord('active-update');
+  installLocalStorage();
+  const active = await versionedRecord('active-update');
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -390,28 +937,8 @@ test('ordinary updates do not send or overwrite the deletion flag', async () => 
   assert.equal(Object.hasOwn(update[2], 'is_deleted'), false);
 });
 
-test('an old ID whose record changed base word is never redirected to another duplicate', async () => {
-  const changedRecord = cloudRecord('same-id', {
-    symbol: 'B',
-    encrypted_password: 'beta',
-  });
-  const oldDuplicate = cloudRecord('old-duplicate');
-  globalThis.__cloudTest = {
-    user: { id: 'account-a' },
-    writes: [],
-    cancelled: [],
-    getFullList: async () => [changedRecord, oldDuplicate],
-  };
-
-  await assert.rejects(
-    cloudSync.markMessageDeleted(chatMessage('alpha', 'same-id'), 'seed', 'account-a'),
-    /canviat de paraula base/,
-  );
-  assert.deepEqual(globalThis.__cloudTest.writes, []);
-});
-
 test('saving a logo cannot reactivate a deleted record', async () => {
-  const deleted = cloudRecord('deleted-logo', { is_deleted: true });
+  const deleted = await versionedRecord('deleted-logo', 'alpha', { is_deleted: true });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -427,8 +954,8 @@ test('saving a logo cannot reactivate a deleted record', async () => {
 });
 
 test('deletion uses the selected PocketBase ID when base words are duplicated', async () => {
-  const selected = cloudRecord('selected-id');
-  const duplicate = cloudRecord('duplicate-id', { password_length: 20 });
+  const selected = await versionedRecord('selected-id');
+  const duplicate = await versionedRecord('duplicate-id', 'alpha', { password_length: 20 });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -444,20 +971,23 @@ test('deletion uses the selected PocketBase ID when base words are duplicated', 
   assert.deepEqual(update[2], { is_deleted: true });
 });
 
-test('a local message with an ambiguous duplicate base word does not modify any remote record', async () => {
+test('a remote record changed between resolution and mutation is left untouched', async () => {
+  const resolved = await versionedRecord('racing-record', 'alpha', { updated: '2025-01-02T00:00:00Z' });
+  const changed = await versionedRecord('racing-record', 'different base', { updated: '2025-01-03T00:00:00Z' });
+  let readCount = 0;
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
     cancelled: [],
-    getFullList: async () => [
-      cloudRecord('duplicate-one'),
-      cloudRecord('duplicate-two'),
-    ],
+    getFullList: async () => {
+      readCount += 1;
+      return readCount === 1 ? [resolved] : [changed];
+    },
   };
 
   await assert.rejects(
     cloudSync.markMessageDeleted(chatMessage('alpha', 'local-id'), 'seed', 'account-a'),
-    /inequívocament/,
+    /ha canviat durant l’operació/,
   );
   assert.deepEqual(globalThis.__cloudTest.writes, []);
 });
@@ -514,7 +1044,8 @@ test('the recycle bin resolves external logos from logo_url when there is no upl
 });
 
 test('restoring a deleted record changes only its deletion flag', async () => {
-  const deleted = cloudRecord('restore-id', { is_deleted: true });
+  const deleted = await versionedRecord('restore-id', 'alpha', { is_deleted: true });
+  const originalCiphertext = deleted.encrypted_password;
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -523,13 +1054,13 @@ test('restoring a deleted record changes only its deletion flag', async () => {
     update: async (id, fields) => ({ ...deleted, id, ...fields }),
   };
 
-  await cloudSync.restoreDeletedCloudRecord('restore-id');
+  await cloudSync.restoreDeletedCloudRecord('restore-id', 'seed');
 
   const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
   assert.equal(update[1], 'restore-id');
   assert.deepEqual(update[2], { is_deleted: false });
-  assert.equal(deleted.encrypted_password, 'alpha');
-  assert.equal(deleted.encrypted_comment, 'private comment');
+  assert.equal(deleted.encrypted_password, originalCiphertext);
+  assert.match(deleted.encrypted_comment, /^paraules:v2:/);
   assert.equal(deleted.logo, 'logo.png');
   assert.equal(deleted.password_length, 10);
 });
@@ -549,11 +1080,11 @@ test('a pending restore is stopped if the authenticated account changes before m
     },
   };
 
-  const pendingRestore = cloudSync.restoreDeletedCloudRecord('restore-pending');
+  const pendingRestore = cloudSync.restoreDeletedCloudRecord('restore-pending', 'seed');
   await started;
   globalThis.__cloudTest.user = { id: 'account-b' };
   cloudSync.cancelCloudSyncRequests('account-a');
-  releaseQuery([cloudRecord('restore-pending', { is_deleted: true })]);
+  releaseQuery([await versionedRecord('restore-pending', 'alpha', { is_deleted: true })]);
 
   await assert.rejects(pendingRestore, /sessió del compte ha canviat/);
   assert.deepEqual(globalThis.__cloudTest.writes, []);
@@ -561,7 +1092,7 @@ test('a pending restore is stopped if the authenticated account changes before m
 });
 
 test('permanent deletion is confirmed in the recycle-bin UI and calls PocketBase with the selected ID', async () => {
-  const deleted = cloudRecord('permanent-id', { is_deleted: true });
+  const deleted = await versionedRecord('permanent-id', 'alpha', { is_deleted: true });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -570,43 +1101,45 @@ test('permanent deletion is confirmed in the recycle-bin UI and calls PocketBase
     delete: async () => true,
   };
 
-  await cloudSync.permanentlyDeleteCloudRecord('permanent-id');
+  await cloudSync.permanentlyDeleteCloudRecord('permanent-id', 'seed');
 
   const deletion = globalThis.__cloudTest.writes.find(([method]) => method === 'delete');
   assert.equal(deletion[1], 'permanent-id');
   assert.match(recycleBinSource, /window\.confirm\(/);
-  assert.match(recycleBinSource, /permanentlyDeleteCloudRecord\(record\.id\)/);
+  assert.match(recycleBinSource, /permanentlyDeleteCloudRecord\(record\.id, seedWord\)/);
   assert.match(recycleBinSource, /Aquesta acció no es pot desfer/);
 });
 
 test('a permanent-delete permission error is shown and does not remove the trash record', async () => {
+  const cannotDelete = await versionedRecord('cannot-delete', 'alpha', { is_deleted: true });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
     cancelled: [],
-    getFullList: async () => [cloudRecord('cannot-delete', { is_deleted: true })],
+    getFullList: async () => [cannotDelete],
     delete: async () => { throw new Error('permission denied'); },
   };
 
-  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('cannot-delete'), /permission denied/);
+  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('cannot-delete', 'seed'), /permission denied/);
   assert.match(recycleBinSource, /catch \(deleteError\)[\s\S]*setError/);
-  assert.match(recycleBinSource, /await permanentlyDeleteCloudRecord\(record\.id\)/);
+  assert.match(recycleBinSource, /await permanentlyDeleteCloudRecord\(record\.id, seedWord\)/);
 });
 
 test('a false PocketBase delete result is reported as a failure', async () => {
+  const deleteFalse = await versionedRecord('delete-false', 'alpha', { is_deleted: true });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
     cancelled: [],
-    getFullList: async () => [cloudRecord('delete-false', { is_deleted: true })],
+    getFullList: async () => [deleteFalse],
     delete: async () => false,
   };
 
-  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('delete-false'), /no ha confirmat l’eliminació permanent/);
+  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('delete-false', 'seed'), /no ha confirmat l’eliminació permanent/);
 });
 
 test('network or permission errors from deletion are propagated instead of reported as success', async () => {
-  const active = cloudRecord('network-delete');
+  const active = await versionedRecord('network-delete');
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -642,7 +1175,7 @@ test('a pending delete is stopped if the authenticated account changes before mu
   await started;
   globalThis.__cloudTest.user = { id: 'account-b' };
   cloudSync.cancelCloudSyncRequests('account-a');
-  releaseQuery([cloudRecord('record-a')]);
+  releaseQuery([await versionedRecord('record-a')]);
 
   await assert.rejects(pendingDelete, /sessió del compte ha canviat/);
   assert.deepEqual(globalThis.__cloudTest.writes, []);
@@ -655,8 +1188,9 @@ test('the normal cloud list and initial synchronization still omit deleted recor
     writes: [],
     cancelled: [],
     getFullList: async (...args) => {
-      assert.match(args[0].filter, /is_deleted = false/);
-      return [cloudRecord('visible')];
+      assert.match(args[0].filter, /user_id = "account-a"/);
+      assert.doesNotMatch(args[0].filter, /is_deleted = false/);
+      return [cloudRecord('visible'), cloudRecord('deleted', { is_deleted: true })];
     },
   };
 
@@ -666,14 +1200,15 @@ test('the normal cloud list and initial synchronization still omit deleted recor
 });
 
 test('active records cannot be permanently deleted from the recycle bin', async () => {
+  const active = await versionedRecord('active-id');
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
     cancelled: [],
-    getFullList: async () => [cloudRecord('active-id')],
+    getFullList: async () => [active],
   };
 
-  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('active-id'), /és activa/);
+  await assert.rejects(cloudSync.permanentlyDeleteCloudRecord('active-id', 'seed'), /és activa/);
   assert.deepEqual(globalThis.__cloudTest.writes, []);
 });
 
@@ -691,20 +1226,7 @@ test('resolves direct HTTP(S) image URLs and known brand domains, rejecting inva
 });
 
 test('saves a URL in logo_url and clears the previous file field', async () => {
-  const record = {
-    id: 'record-a',
-    user_id: 'account-a',
-    symbol: 'A',
-    encrypted_password: 'alpha',
-    password_length: 10,
-    uppercase: true,
-    lowercase: true,
-    numbers: true,
-    symbols: false,
-    is_deleted: false,
-    logo: 'old-logo.png',
-    logo_url: '',
-  };
+  const record = await versionedRecord('record-a', 'alpha', { logo: 'old-logo.png', logo_url: '' });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -717,25 +1239,13 @@ test('saves a URL in logo_url and clears the previous file field', async () => {
   assert.equal(savedUrl, 'https://cdn.example.test/new-logo.png');
   const update = globalThis.__cloudTest.writes.find(([method]) => method === 'update');
   assert.deepEqual(update[2], { logo: [], logo_url: 'https://cdn.example.test/new-logo.png' });
-  assert.match(passwordBubbleSource, /onSaveLogo\(logoPreviewUrl, logoFile\)/);
+  assert.match(passwordBubbleSource, /onSaveChanges\(changes\)/);
+  assert.match(passwordBubbleSource, /changes\.logoChange =/);
   assert.match(passwordBubbleSource, /Treu-lo/);
 });
 
 test('uploads a selected local image as a file and clears the previous URL', async () => {
-  const record = {
-    id: 'record-a',
-    user_id: 'account-a',
-    symbol: 'A',
-    encrypted_password: 'alpha',
-    password_length: 10,
-    uppercase: true,
-    lowercase: true,
-    numbers: true,
-    symbols: false,
-    is_deleted: false,
-    logo: null,
-    logo_url: 'https://cdn.example.test/old-logo.png',
-  };
+  const record = await versionedRecord('record-a', 'alpha', { logo: null, logo_url: 'https://cdn.example.test/old-logo.png' });
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
     writes: [],
@@ -755,8 +1265,8 @@ test('uploads a selected local image as a file and clears the previous URL', asy
 
 test('restores file logos with priority, URL logos, and legacy locally saved logo URLs', async () => {
   const records = [
-    { id: 'file', user_id: 'account-a', symbol: 'F', encrypted_password: 'file-brand', password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, logo: 'brand.png', logo_url: 'https://old.example/ignored.png', created: '', updated: '' },
-    { id: 'url', user_id: 'account-a', symbol: 'U', encrypted_password: 'url-brand', password_length: 10, uppercase: true, lowercase: true, numbers: true, symbols: false, is_deleted: false, logo: null, logo_url: 'https://cdn.example.test/url-logo.png', created: '', updated: '' },
+    cloudRecord('file', { encrypted_password: 'file-brand', symbol: 'F', logo: 'brand.png', logo_url: 'https://old.example/ignored.png' }),
+    cloudRecord('url', { encrypted_password: 'url-brand', symbol: 'U', logo: null, logo_url: 'https://cdn.example.test/url-logo.png' }),
   ];
   globalThis.__cloudTest = {
     user: { id: 'account-a' },
@@ -822,7 +1332,9 @@ test('a correct PIN clears lockout and preserves box records', () => {
 
   assert.deepEqual(storage.getChatMessages('account-a').map(({ baseWord }) => baseWord), ['must-survive-lockout']);
   assert.match(unlockScreenSource, /status\.remainingMs > 0/);
-  assert.match(unlockScreenSource, /const decrypted = decryptSeed\(encrypted, pin\)/);
+  assert.match(unlockScreenSource, /decrypted = decryptSeed\(encrypted, pin\)/);
+  assert.match(unlockScreenSource, /decrypted = await unlockSeedVault\(JSON\.parse\(rawVault\), pin\)/);
+  assert.doesNotMatch(unlockScreenSource, /recoverySecret|Secret de recuperació/);
   assert.match(unlockScreenSource, /clearPinLockout\(\)[\s\S]*onUnlock\(decrypted\)/);
   assert.doesNotMatch(unlockScreenSource, /clearSeed|Reinicia la caixa/);
   assert.equal(pinLockout.getPinLockoutStatus(3_000_000).failedAttempts, 0);
@@ -849,8 +1361,8 @@ test('focuses the base-word input only on the first chat entry', () => {
   assert.doesNotMatch(chatScreenSource, /inputRef\.current\?\.select/);
 });
 
-test('keeps the chat mounted but hidden during PIN lock and restores focused field selection', () => {
-  assert.match(appSource, /chatSessionMounted && \([\s\S]*<div ref=\{chatContainerRef\} hidden=\{state === 'locked'\} aria-hidden=\{state === 'locked'\}>[\s\S]*<ChatScreen/);
+test('unmounts the chat during PIN lock and restores focused field selection after unlock', () => {
+  assert.match(appSource, /chatSessionMounted && state === 'unlocked' && \([\s\S]*<div ref=\{chatContainerRef\}>[\s\S]*<ChatScreen/);
   assert.match(appSource, /const snapshot = captureFocusedElement\(chatContainerRef\.current\);[\s\S]*if \(snapshot\) focusSnapshotRef\.current = snapshot/);
   assert.match(appSource, /snapshot\.element\.focus\(\{ preventScroll: true \}\)/);
   assert.match(appSource, /snapshot\.element\.setSelectionRange\([\s\S]*snapshot\.selectionStart[\s\S]*snapshot\.selectionEnd/);

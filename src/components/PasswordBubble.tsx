@@ -1,17 +1,30 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Copy, Check, Eye, EyeOff, RefreshCw, Trash2, MessageSquare, AlertTriangle, AlertCircle, KeyRound, ChevronDown, ChevronUp, Image } from 'lucide-react';
-import { estimateStrength } from '@/lib/passwordGenerator';
+import { Copy, Check, Eye, EyeOff, RefreshCw, Trash2, MessageSquare, AlertTriangle, AlertCircle, ChevronDown, ChevronUp, Image } from 'lucide-react';
+import { estimateStrength, generatePassword } from '@/lib/passwordGenerator';
 import { resolveLogoInput } from '@/lib/logo';
 import { MessageOptions } from '@/lib/storage';
+import { PasswordCardActions, PasswordCardIcon, PasswordCardSurface } from './PasswordCardVisuals';
+
+export interface PasswordBubbleChanges {
+  comment: string;
+  options?: MessageOptions;
+  logoChange?: {
+    logoUrl?: string;
+    file?: File;
+    previewUrl?: string;
+  };
+}
 
 interface PasswordBubbleProps {
   messageId: string;
   baseWord: string;
-  password: string;
+  seedWord: string;
+  password?: string;
   initiallyExpanded: boolean;
   autoHide: boolean;
   comment: string;
   logoUrl?: string;
+  icon?: string;
   options: MessageOptions;
   collapseAllSignal: number;
   expandAllSignal: number;
@@ -20,10 +33,8 @@ interface PasswordBubbleProps {
   onExpandedChange: (id: string, expanded: boolean) => void;
   createdAt?: string;
   updatedAt?: string;
-  onRegenerate: (options: MessageOptions) => void;
+  onSaveChanges: (changes: PasswordBubbleChanges) => Promise<void>;
   onDelete: () => void;
-  onSaveComment: (comment: string) => void;
-  onSaveLogo: (logoUrl: string | undefined, file?: File) => Promise<void>;
   onHighlight?: () => void;
 }
 
@@ -41,11 +52,13 @@ function optionsEqual(a: MessageOptions, b: MessageOptions): boolean {
 export default function PasswordBubble({
   messageId,
   baseWord,
+  seedWord,
   password,
   initiallyExpanded,
   autoHide,
   comment,
   logoUrl,
+  icon,
   options,
   collapseAllSignal,
   expandAllSignal,
@@ -54,13 +67,12 @@ export default function PasswordBubble({
   onExpandedChange,
   createdAt,
   updatedAt,
-  onRegenerate,
+  onSaveChanges,
   onDelete,
-  onSaveComment,
-  onSaveLogo,
   onHighlight,
 }: PasswordBubbleProps) {
   const [visible, setVisible] = useState(initiallyExpanded || !autoHide);
+  const [transientPassword, setTransientPassword] = useState('');
   const [copied, setCopied] = useState(false);
   const [commentOpen, setCommentOpen] = useState(false);
   const [commentDraft, setCommentDraft] = useState(comment);
@@ -72,12 +84,15 @@ export default function PasswordBubble({
   const [logoPreviewUrl, setLogoPreviewUrl] = useState('');
   const [logoError, setLogoError] = useState('');
   const [logoLoading, setLogoLoading] = useState(false);
-  const [logoSaving, setLogoSaving] = useState(false);
   const [logoResolvedDomain, setLogoResolvedDomain] = useState('');
   const [logoFile, setLogoFile] = useState<File | undefined>();
   const logoFileInputRef = useRef<HTMLInputElement>(null);
   const [collapsed, setCollapsed] = useState(!initiallyExpanded);
   const [regenerationOptions, setRegenerationOptions] = useState<MessageOptions>(options);
+  const [pendingRegenerationOptions, setPendingRegenerationOptions] = useState<MessageOptions | null>(null);
+  const [pendingLogoChange, setPendingLogoChange] = useState<PasswordBubbleChanges['logoChange'] | null>(null);
+  const [savingChanges, setSavingChanges] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const confirmRef = useRef<HTMLDivElement>(null);
   const commentRef = useRef<HTMLTextAreaElement>(null);
   const logoObjectUrlRef = useRef<string | null>(null);
@@ -96,7 +111,7 @@ export default function PasswordBubble({
   }, []);
 
   const setLogoPreview = useCallback((url: string, file?: File) => {
-    if (logoObjectUrlRef.current) {
+    if (logoObjectUrlRef.current && logoObjectUrlRef.current !== url) {
       URL.revokeObjectURL(logoObjectUrlRef.current);
       logoObjectUrlRef.current = null;
     }
@@ -146,15 +161,27 @@ export default function PasswordBubble({
       setVisible(true);
     }
   }, [expandOneSignal, expandOneId, messageId]);
-  const strength = estimateStrength(password);
+  useEffect(() => {
+    if (visible && !password && !transientPassword) {
+      setTransientPassword(generatePassword(seedWord, baseWord, options));
+    }
+  }, [visible, password, transientPassword, seedWord, baseWord, options]);
+  const displayedPassword = transientPassword || password || '';
+  const displayedLogoUrl = pendingLogoChange
+    ? pendingLogoChange.file ? pendingLogoChange.previewUrl : pendingLogoChange.logoUrl
+    : logoUrl;
+  const hasUnsavedChanges = commentDraft.trim() !== comment || !!pendingRegenerationOptions || !!pendingLogoChange;
+  const strength = estimateStrength(displayedPassword);
   const strengthColors = ['bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-emerald-500'];
   const strengthText = ['text-red-600 dark:text-red-400', 'text-orange-600 dark:text-orange-400', 'text-yellow-600 dark:text-yellow-400', 'text-emerald-600 dark:text-emerald-400'];
   async function copy() {
+    const value = transientPassword || password || generatePassword(seedWord, baseWord, options);
+    if (!transientPassword && !password) setTransientPassword(value);
     try {
-      await navigator.clipboard.writeText(password);
+      await navigator.clipboard.writeText(value);
     } catch {
       const ta = document.createElement('textarea');
-      ta.value = password;
+      ta.value = value;
       document.body.appendChild(ta);
       ta.select();
       document.execCommand('copy');
@@ -162,11 +189,6 @@ export default function PasswordBubble({
     }
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
-  }
-
-  function saveComment() {
-    onSaveComment(commentDraft.trim());
-    if (!commentDraft.trim()) setCommentOpen(false);
   }
 
   function handleCommentButtonClick() {
@@ -184,7 +206,34 @@ export default function PasswordBubble({
 
   function confirmRegenerate() {
     setConfirmOpen(false);
-    onRegenerate(regenerationOptions);
+    setTransientPassword(generatePassword(seedWord, baseWord, regenerationOptions));
+    setPendingRegenerationOptions(regenerationOptions);
+    setVisible(true);
+  }
+
+  async function saveChanges(): Promise<void> {
+    const changes: PasswordBubbleChanges = { comment: commentDraft.trim() };
+    if (pendingRegenerationOptions) changes.options = pendingRegenerationOptions;
+    if (pendingLogoChange) {
+      changes.logoChange = {
+        ...(pendingLogoChange.logoUrl ? { logoUrl: pendingLogoChange.logoUrl } : {}),
+        ...(pendingLogoChange.file ? { file: pendingLogoChange.file } : {}),
+      };
+    }
+    setSavingChanges(true);
+    setSaveError('');
+    try {
+      await onSaveChanges(changes);
+      if (pendingRegenerationOptions) setPendingRegenerationOptions(null);
+      if (pendingLogoChange) {
+        setPendingLogoChange(null);
+        if (pendingLogoChange.file) setLogoPreview('');
+      }
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'No s’han pogut desar els canvis.');
+    } finally {
+      setSavingChanges(false);
+    }
   }
 
   function updateRegenerationOption<K extends keyof MessageOptions>(
@@ -200,6 +249,8 @@ export default function PasswordBubble({
     if (expanding) {
       setVisible(true);
       onHighlight?.();
+    } else if (autoHide) {
+      setVisible(false);
     }
     onExpandedChange(messageId, expanding);
   }
@@ -245,46 +296,33 @@ export default function PasswordBubble({
     setLogoPreview(previewUrl, file);
   }
 
-  async function saveLogo() {
-    if (!logoPreviewUrl || (!logoFile && !logoQuery.trim())) return;
-    setLogoSaving(true);
-    setLogoError('');
-    try {
-      await onSaveLogo(logoPreviewUrl, logoFile);
-      setLogoPanelOpen(false);
-      if (logoFile && logoObjectUrlRef.current) setLogoPreview('');
-    } catch (error) {
-      setLogoError(error instanceof Error ? error.message : 'No s’ha pogut desar el logotip.');
-    } finally {
-      setLogoSaving(false);
-    }
+  function saveLogo() {
+    const selectedFile = logoFile ?? (pendingLogoChange?.previewUrl === logoPreviewUrl ? pendingLogoChange.file : undefined);
+    if (!logoPreviewUrl || (!selectedFile && !logoQuery.trim())) return;
+    setPendingLogoChange(selectedFile ? { file: selectedFile, previewUrl: logoPreviewUrl } : { logoUrl: logoPreviewUrl });
+    setLogoPanelOpen(false);
   }
 
-  async function removeLogo() {
-    setLogoSaving(true);
-    setLogoError('');
-    try {
-      await onSaveLogo(undefined);
-      setLogoPreview('');
-      setLogoPanelOpen(false);
-    } catch (error) {
-      setLogoError(error instanceof Error ? error.message : 'No s’ha pogut eliminar el logotip.');
-    } finally {
-      setLogoSaving(false);
-    }
+  function removeLogo() {
+    setPendingLogoChange({});
+    setLogoPreview('');
+    setLogoPanelOpen(false);
   }
 
   return (
     <div className="flex justify-start" onClickCapture={onHighlight}>
       <div className="w-full">
-        <div className="rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm dark:shadow-lg">
+        <PasswordCardSurface>
           <div
             className="flex items-center gap-2 p-4 cursor-pointer select-none"
             onClick={toggleExpanded}
           >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 flex items-center justify-center shrink-0 overflow-hidden">
-              {logoUrl ? <img src={logoUrl} alt={`Logotip de ${baseWord}`} className="w-full h-full object-contain" onError={() => setLogoError('El logo guardat no s’ha pogut carregar. Torna a provar amb un domini correcte.')} /> : <KeyRound className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />}
-            </div>
+            <PasswordCardIcon
+              logoUrl={displayedLogoUrl}
+              icon={icon}
+              alt={`Logotip de ${baseWord}`}
+              onError={() => setLogoError('El logo guardat no s’ha pogut carregar. Torna a provar amb un domini correcte.')}
+            />
             <div className="flex-1 min-w-0 text-[15px] font-semibold text-slate-900 dark:text-white truncate">{baseWord}</div>
             <button
               onClick={(event) => { event.stopPropagation(); toggleExpanded(); }}
@@ -314,13 +352,13 @@ export default function PasswordBubble({
               {logoError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{logoError}</p>}
               {logoPreviewUrl && <div className="mt-3 flex items-center gap-3">
                 <div className="w-14 h-14 rounded-lg bg-white border border-slate-200 flex items-center justify-center overflow-hidden shrink-0">{!logoError ? <img key={logoPreviewUrl} src={logoPreviewUrl} alt="Previsualització del logotip" className="w-full h-full object-contain" onLoad={() => setLogoLoading(false)} onError={() => { setLogoLoading(false); setLogoError(logoResolvedDomain ? `No s’ha pogut carregar el logo per al domini ${logoResolvedDomain}. Comprova el token i la connexió.` : 'No s’ha pogut carregar la imatge. Comprova que la URL sigui accessible i apunti a una imatge, o tria un altre fitxer.'); }} /> : <span className="px-1 text-center text-[10px] leading-tight text-slate-500">No s’ha pogut carregar</span>}</div>
-                <div className="flex flex-wrap gap-2"><button type="button" onClick={() => void saveLogo()} disabled={!logoPreviewUrl || (!logoFile && !logoQuery.trim()) || logoLoading || logoSaving || !!logoError} className="rounded-lg bg-emerald-600 disabled:opacity-40 px-3 py-2 text-sm font-medium text-white">{logoSaving ? 'Desant…' : 'Desa el logotip'}</button><button type="button" onClick={() => void removeLogo()} disabled={logoSaving} className="rounded-lg bg-slate-200 dark:bg-slate-700 disabled:opacity-40 px-3 py-2 text-sm text-slate-700 dark:text-slate-200">Treu-lo</button></div>
+                <div className="flex flex-wrap gap-2"><button type="button" onClick={saveLogo} disabled={!logoPreviewUrl || (!logoFile && !logoQuery.trim()) || logoLoading || !!logoError} className="rounded-lg bg-emerald-600 disabled:opacity-40 px-3 py-2 text-sm font-medium text-white">Aplica el logotip</button><button type="button" onClick={removeLogo} className="rounded-lg bg-slate-200 dark:bg-slate-700 px-3 py-2 text-sm text-slate-700 dark:text-slate-200">Treu-lo</button></div>
               </div>}
             </div>
           )}
 
           <div className="font-mono text-[15px] leading-relaxed text-emerald-700 dark:text-emerald-300 break-all tracking-wide select-all border-t border-slate-200 dark:border-slate-700 pt-3" style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}>
-            {visible ? password : '•'.repeat(Math.min(password.length, 24))}
+            {visible ? displayedPassword : '•'.repeat(Math.min(displayedPassword.length || options.length, 24))}
           </div>
 
           <div className="mt-3 flex items-center gap-2">
@@ -417,8 +455,6 @@ export default function PasswordBubble({
                 ref={commentRef}
                 value={commentDraft}
                 onChange={(event) => setCommentDraft(event.target.value)}
-                onBlur={() => { if (commentDraft.trim() !== comment) saveComment(); }}
-                onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); saveComment(); } }}
                 placeholder="Escriu un comentari…"
                 rows={2}
                 className="w-full rounded-lg bg-slate-100 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 px-3 py-2 text-sm text-slate-700 dark:text-slate-300 break-words resize-none focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -426,38 +462,28 @@ export default function PasswordBubble({
             </div>
           )}
 
-          <div className="mt-3 grid w-full min-w-0 grid-cols-3 gap-2 min-[430px]:grid-cols-6">
-            <button onClick={copy} title={copied ? 'Copiada' : 'Copia'} aria-label={copied ? 'Copiada' : 'Copia'} className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white transition-colors">
-              {copied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-4 w-4" />}
-            </button>
-            <button onClick={() => setVisible((value) => !value)} title={visible ? 'Amaga' : 'Mostra'} className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white transition-colors" aria-label={visible ? 'Amaga' : 'Mostra'}>
-              {visible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-            <button onClick={handleCommentButtonClick} title="Comentari" className={`box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg transition-colors ${comment || commentOpen ? 'bg-emerald-600 text-emerald-50 dark:bg-emerald-700 dark:text-emerald-100' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white'}`} aria-label="Comentari">
-              <MessageSquare className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => { setLogoPanelOpen((open) => !open); setLogoQuery(''); setLogoPreview(logoUrl || ''); setLogoError(''); }}
-              className={`box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg transition-colors ${logoPanelOpen || logoUrl ? 'bg-emerald-600 text-white dark:bg-emerald-700' : 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white'}`}
-              aria-label="Logotip"
-              title="Cerca o canvia el logotip"
-            >
-              <Image className="w-4 h-4" />
-            </button>
-            <button
-              onClick={handleRegenerateClick}
-              disabled={!canRegenerate}
-              className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 active:bg-slate-300 dark:active:bg-slate-900 text-slate-900 dark:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              aria-label="Torna a generar"
-              title={!canRegenerate ? 'La configuració actual coincideix amb la de la contrasenya' : undefined}
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-            <button onClick={() => setDeleteOpen(true)} title="Esborra" className="box-border flex h-11 w-full min-w-0 items-center justify-center rounded-lg bg-red-100 dark:bg-red-950/70 hover:bg-red-200 dark:hover:bg-red-900 active:bg-red-300 dark:active:bg-red-950 text-red-600 dark:text-red-300 transition-colors" aria-label="Esborra">
-              <Trash2 className="w-4 h-4" />
-            </button>
-          </div>
+          <PasswordCardActions actions={[
+            { key: 'copy', label: copied ? 'Copiada' : 'Copia', title: copied ? 'Copiada' : 'Copia', icon: copied ? <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-4 w-4" />, onClick: () => void copy() },
+            { key: 'visibility', label: visible ? 'Amaga' : 'Mostra', title: visible ? 'Amaga' : 'Mostra', icon: visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />, onClick: () => setVisible((value) => !value) },
+            { key: 'comment', label: 'Comentari', title: 'Comentari', icon: <MessageSquare className="h-4 w-4" />, active: !!comment || commentOpen, onClick: handleCommentButtonClick },
+            {
+              key: 'logo',
+              label: 'Logotip',
+              title: 'Cerca o canvia el logotip',
+              icon: <Image className="h-4 w-4" />,
+              active: logoPanelOpen || !!displayedLogoUrl,
+              onClick: () => {
+                setLogoPanelOpen((open) => !open);
+                setLogoQuery('');
+                setLogoPreview(pendingLogoChange
+                  ? pendingLogoChange.previewUrl ?? pendingLogoChange.logoUrl ?? ''
+                  : logoUrl ?? '');
+                setLogoError('');
+              },
+            },
+            { key: 'regenerate', label: 'Torna a generar', title: !canRegenerate ? 'La configuració actual coincideix amb la de la contrasenya' : undefined, icon: <RefreshCw className="h-4 w-4" />, disabled: !canRegenerate, onClick: handleRegenerateClick },
+            { key: 'delete', label: 'Esborra', title: 'Esborra', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setDeleteOpen(true) },
+          ]} />
 
           {deleteOpen && (
             <div ref={confirmRef} className="mt-3 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800/60 p-3">
@@ -496,10 +522,19 @@ export default function PasswordBubble({
               </div>
             </div>
           )}
+          {saveError && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">{saveError}</p>}
+          <button
+            type="button"
+            disabled={!hasUnsavedChanges || savingChanges}
+            onClick={() => void saveChanges()}
+            className="mt-3 flex h-10 w-full items-center justify-center rounded-lg bg-emerald-600 px-3 font-medium text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {savingChanges ? 'Desant…' : 'Desa els canvis'}
+          </button>
           </div>
           )}
+          </PasswordCardSurface>
         </div>
       </div>
-    </div>
   );
 }

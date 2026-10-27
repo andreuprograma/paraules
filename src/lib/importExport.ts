@@ -38,7 +38,8 @@ function boolToText(v: boolean): string {
 }
 
 function escapeField(value: string): string {
-  if (value.includes('\n') || value.includes('\r') || value.includes('\t') || value.includes('"')) {
+  if (value.includes('\n') || value.includes('\r') || value.includes('\t') || value.includes('"') ||
+    /^\s|\s$/u.test(value)) {
     return `"${value.replace(/"/g, '""')}"`;
   }
   return value;
@@ -130,7 +131,7 @@ export interface ParsedRow {
 }
 
 export function parseImportData(raw: string): ParsedRow[] {
-  const rows = parseRows(raw).filter((cells) => cells.some((c) => c.trim() !== ''));
+  const rows = parseRows(raw).filter((cells) => cells.some((c) => c !== ''));
   if (rows.length === 0) return [];
 
   let startIndex = 0;
@@ -139,8 +140,8 @@ export function parseImportData(raw: string): ParsedRow[] {
   const result: ParsedRow[] = [];
   for (let i = startIndex; i < rows.length; i++) {
     const cells = rows[i];
-    const baseWord = cells[0]?.trim();
-    if (!baseWord) continue;
+    const baseWord = cells[0] ?? '';
+    if (baseWord === '') continue;
 
     const length = clampLength(parseInt(cells[1] ?? '', 10) || DEFAULT_SETTINGS.length);
     const uppercase = cells[2] !== undefined ? parseBoolean(cells[2]) : true;

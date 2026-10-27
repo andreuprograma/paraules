@@ -6,10 +6,15 @@ import ChatScreen from '@/components/ChatScreen';
 import {
   ChatMessage,
   getEncryptedSeed,
+  getMasterFormat,
+  getPinOnlySeedVault,
+  hasConfiguredMaster,
   getDefaultSettings,
+  MasterFormat,
   SavedSettings,
 } from '@/lib/storage';
 import { decryptSeed } from '@/lib/passwordGenerator';
+import { verifySeedVaultPin } from '@/lib/seedVault';
 import { getCloudUser, pb, signOut } from '@/lib/pocketbase';
 import { cancelCloudSyncRequests, markMessageDeleted, mergeLocalWithCloud, saveMessageLogo, upsertMessage } from '@/lib/cloudSync';
 import { applyTheme, getTheme, setTheme, Theme } from '@/lib/theme';
@@ -47,14 +52,10 @@ function captureFocusedElement(container: HTMLElement | null): FocusSnapshot | n
   return { element, selectionStart: null, selectionEnd: null, selectionDirection: null };
 }
 
-function verifyPin(pin: string): boolean {
-  const encrypted = getEncryptedSeed();
-  if (!encrypted) return false;
-  return decryptSeed(encrypted, pin) !== null;
-}
-
 export default function App() {
   const [state, setState] = useState<AppState>('loading');
+  const [masterFormat, setMasterFormat] = useState<MasterFormat>(() => getMasterFormat());
+  const [upgradingMaster, setUpgradingMaster] = useState(false);
   const [seedWord, setSeedWord] = useState('');
   const [chatSessionMounted, setChatSessionMounted] = useState(false);
   const [focusBaseWordOnMount, setFocusBaseWordOnMount] = useState(false);
@@ -85,7 +86,9 @@ export default function App() {
     hasOpenedChatRef.current = false;
     focusSnapshotRef.current = null;
     setCloudStatus('offline');
-    setState(nextUserId ? (getEncryptedSeed() ? 'locked' : 'setup') : 'auth');
+    const hasMaster = hasConfiguredMaster();
+    setMasterFormat(getMasterFormat());
+    setState(nextUserId ? (hasMaster ? 'locked' : 'setup') : 'auth');
   }), []);
 
   function handleThemeChange(next: Theme): void {
@@ -94,8 +97,25 @@ export default function App() {
   }
 
   useEffect(() => {
-    const hasSeed = getEncryptedSeed() !== null;
+    const hasSeed = hasConfiguredMaster();
+    setMasterFormat(getMasterFormat());
     setState(getCloudUser() ? (hasSeed ? 'locked' : 'setup') : 'auth');
+  }, []);
+
+  const cloudActionsEnabled = true;
+
+  const verifyPin = useCallback(async (pin: string): Promise<boolean> => {
+    if (getMasterFormat() === 'pin') {
+      const rawVault = getPinOnlySeedVault();
+      if (!rawVault) return false;
+      try {
+        return await verifySeedVaultPin(JSON.parse(rawVault), pin);
+      } catch {
+        return false;
+      }
+    }
+    const encrypted = getEncryptedSeed();
+    return encrypted ? decryptSeed(encrypted, pin) !== null : false;
   }, []);
 
   const rememberFocusedElement = useCallback(() => {
@@ -198,22 +218,23 @@ export default function App() {
 
   function continueToApp(): void {
     focusSnapshotRef.current = null;
-    setState(getEncryptedSeed() ? 'locked' : 'setup');
+    setState(hasConfiguredMaster() ? 'locked' : 'setup');
   }
 
   function handleCloudAuthenticated(): void {
     setSeedWord('');
-    setCloudStatus('synced');
+    setCloudStatus(cloudActionsEnabled ? 'synced' : 'offline');
     continueToApp();
   }
 
   async function syncInitialMessages(localMessages: ChatMessage[]): Promise<ChatMessage[]> {
+    if (!cloudActionsEnabled) return localMessages;
     const userId = cloudUserId;
     if (!userId) return localMessages;
     if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat.');
     setCloudStatus('syncing');
     try {
-      const merged = await mergeLocalWithCloud(seedWord, defaultSettings.autoHide, userId);
+      const merged = await mergeLocalWithCloud(seedWord, defaultSettings.autoHide, userId, localMessages);
       if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat.');
       setCloudStatus('synced');
       return merged;
@@ -224,6 +245,7 @@ export default function App() {
   }
 
   function syncMessage(message: ChatMessage): void {
+    if (!cloudActionsEnabled) return;
     const userId = cloudUserId;
     if (!userId || getCloudUser()?.id !== userId) return;
     upsertMessage(message, seedWord, userId)
@@ -232,6 +254,7 @@ export default function App() {
   }
 
   async function deleteCloudMessage(message: ChatMessage): Promise<void> {
+    if (!cloudActionsEnabled) throw new Error('La sincronització està pausada per evitar alterar dades xifrades antigues.');
     const userId = cloudUserId;
     if (!userId) return;
     if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat; no s’ha eliminat la fitxa.');
@@ -246,6 +269,7 @@ export default function App() {
   }
 
   async function saveCloudMessageLogo(message: ChatMessage, file: File | undefined, logoUrl: string | undefined): Promise<string | undefined> {
+    if (!cloudActionsEnabled) throw new Error('La sincronització està pausada per evitar alterar dades xifrades antigues.');
     const userId = cloudUserId;
     if (!userId && !getCloudUser()) {
       if (file) throw new Error('Inicia sessió al núvol per desar un fitxer de logotip.');
@@ -295,13 +319,29 @@ export default function App() {
   }
 
   if (state === 'setup') {
-    return <SetupScreen onComplete={() => setState('locked')} />;
+    return (
+      <SetupScreen
+        isUpgrade={upgradingMaster}
+        onCancel={upgradingMaster ? () => {
+          setUpgradingMaster(false);
+          hasOpenedChatRef.current = false;
+          setState('locked');
+        } : undefined}
+        onComplete={() => {
+          setMasterFormat(getMasterFormat());
+          setUpgradingMaster(false);
+          hasOpenedChatRef.current = false;
+          setSeedWord('');
+          setState('locked');
+        }}
+      />
+    );
   }
 
   return (
     <>
-      {chatSessionMounted && (
-        <div ref={chatContainerRef} hidden={state === 'locked'} aria-hidden={state === 'locked'}>
+      {chatSessionMounted && state === 'unlocked' && (
+        <div ref={chatContainerRef}>
           <ChatScreen
             key={cloudUserId ?? 'local'}
             seedWord={seedWord}
@@ -310,23 +350,39 @@ export default function App() {
             verifyPin={verifyPin}
             onLock={lockApp}
             cloudStatus={cloudStatus}
-            onInitialSync={syncInitialMessages}
-            onCloudMessageChange={syncMessage}
-            onCloudMessageDelete={deleteCloudMessage}
-            onCloudLogoChange={saveCloudMessageLogo}
+            onInitialSync={cloudActionsEnabled ? syncInitialMessages : undefined}
+            onCloudMessageChange={cloudActionsEnabled ? syncMessage : undefined}
+            onCloudMessageDelete={cloudUserId ? deleteCloudMessage : undefined}
+            onCloudLogoChange={cloudActionsEnabled ? saveCloudMessageLogo : undefined}
             cloudUserId={cloudUserId}
             theme={theme}
             onThemeChange={handleThemeChange}
             onSignOut={handleSignOut}
             onSignIn={handleSignIn}
+            onUpgradeMaster={() => {
+              setSeedWord('');
+              setChatSessionMounted(false);
+              hasOpenedChatRef.current = false;
+              setUpgradingMaster(true);
+              setState('setup');
+            }}
+            canUpgradeMaster={masterFormat === 'legacy'}
             focusBaseWordOnMount={focusBaseWordOnMount}
             onInitialFocusComplete={() => setFocusBaseWordOnMount(false)}
+            cloudActionsEnabled={cloudActionsEnabled}
           />
         </div>
       )}
       {state === 'locked' && (
         <div className="fixed inset-0 z-50">
           <UnlockScreen
+            onReconfigurePinOnly={() => {
+              setSeedWord('');
+              setChatSessionMounted(false);
+              hasOpenedChatRef.current = false;
+              setUpgradingMaster(true);
+              setState('setup');
+            }}
             onUnlock={(seed) => {
               setSeedWord(seed);
               if (!hasOpenedChatRef.current) {
@@ -338,6 +394,8 @@ export default function App() {
             }}
             onResetLocalData={() => {
               setSeedWord('');
+              setMasterFormat(getMasterFormat());
+              setUpgradingMaster(false);
               setChatSessionMounted(false);
               setFocusBaseWordOnMount(false);
               hasOpenedChatRef.current = false;

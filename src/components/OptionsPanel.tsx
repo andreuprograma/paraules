@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { SlidersHorizontal, X, Eye, EyeOff, Trash2, AlertTriangle, Lock, Sun, Moon, Database } from 'lucide-react';
+import { SlidersHorizontal, X, Eye, EyeOff, Trash2, AlertTriangle, Lock, Sun, Moon, Database, ShieldCheck, Mail } from 'lucide-react';
 import { SavedSettings } from '@/lib/storage';
 import { Theme } from '@/lib/theme';
 import { getCloudUser } from '@/lib/pocketbase';
 import DatabaseViewerModal from './DatabaseViewerModal';
 import RecycleBinModal from './RecycleBinModal';
+import CloudReadDiagnosticsModal from './CloudReadDiagnosticsModal';
 
 interface OptionsPanelProps {
   open: boolean;
@@ -12,15 +13,17 @@ interface OptionsPanelProps {
   messageCount: number;
   onChange: (settings: SavedSettings) => void;
   onClearAll: () => void;
-  verifyPin: (pin: string) => boolean;
+  verifyPin: (pin: string) => Promise<boolean>;
   onClose: () => void;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   seedWord: string;
   onRecordsChanged?: () => void;
+  cloudActionsEnabled: boolean;
 }
 
-export default function OptionsPanel({ open, settings, messageCount, onChange, onClearAll, verifyPin, onClose, theme, onThemeChange, seedWord, onRecordsChanged }: OptionsPanelProps) {
+export default function OptionsPanel({ open, settings, messageCount, onChange, onClearAll, verifyPin, onClose, theme, onThemeChange, seedWord, onRecordsChanged, cloudActionsEnabled }: OptionsPanelProps) {
+  const cloudUser = getCloudUser();
   const [showSymbolsInput, setShowSymbolsInput] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [pinInput, setPinInput] = useState('');
@@ -28,22 +31,31 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
   const [showPin, setShowPin] = useState(false);
   const [dbOpen, setDbOpen] = useState(false);
   const [recycleBinOpen, setRecycleBinOpen] = useState(false);
+  const [cloudReadDiagnosticsOpen, setCloudReadDiagnosticsOpen] = useState(false);
+  const [checkingPin, setCheckingPin] = useState(false);
 
   function update<K extends keyof SavedSettings>(key: K, value: SavedSettings[K]) {
     onChange({ ...settings, [key]: value });
   }
 
-  function handleConfirmClear() {
+  async function handleConfirmClear(): Promise<void> {
     if (!pinInput) return;
-    if (!verifyPin(pinInput)) {
-      setPinError('El PIN no és correcte.');
-      return;
+    setCheckingPin(true);
+    try {
+      if (!await verifyPin(pinInput)) {
+        setPinError('El PIN no és correcte.');
+        return;
+      }
+      onClearAll();
+      setClearOpen(false);
+      setPinInput('');
+      setPinError('');
+      onClose();
+    } catch {
+      setPinError('No s’ha pogut verificar el PIN.');
+    } finally {
+      setCheckingPin(false);
     }
-    onClearAll();
-    setClearOpen(false);
-    setPinInput('');
-    setPinError('');
-    onClose();
   }
 
   return (
@@ -76,6 +88,19 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
         </div>
 
         <div className="px-5 py-5 space-y-6">
+          <div className="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-4 py-3">
+            <Mail className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-slate-900 dark:text-white">
+                {cloudUser ? 'Sessió iniciada al núvol' : 'No has iniciat sessió al núvol'}
+              </p>
+              {cloudUser && (
+                <p className="mt-0.5 break-all text-sm text-slate-600 dark:text-slate-400">
+                  {cloudUser.email || 'Correu electrònic no disponible'}
+                </p>
+              )}
+            </div>
+          </div>
           <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
             Aquestes són les opcions amb què es generaran les contrasenyes per defecte. Cada vegada que generis una contrasenya, els selectors es restabliran a aquests valors.
           </p>
@@ -210,29 +235,39 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
 
           <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
             <button
+              onClick={() => setCloudReadDiagnosticsOpen(true)}
+              className="mb-2 w-full h-12 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white font-medium text-[15px] transition-colors flex items-center justify-center gap-2"
+            >
+              <ShieldCheck className="w-4 h-4" />
+              Diagnòstic de PocketBase (només lectura)
+            </button>
+            <p className="text-xs text-slate-400 dark:text-slate-500 mb-3 text-center">
+              Consulta paginada independent; no activa la sincronització ni modifica registres.
+            </p>
+            <button
               onClick={() => setRecycleBinOpen(true)}
-              disabled={!getCloudUser()}
+              disabled={!getCloudUser() || !cloudActionsEnabled}
               className="mb-2 w-full h-12 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:bg-slate-100 dark:disabled:bg-slate-800/40 disabled:text-slate-400 dark:disabled:text-slate-600 disabled:cursor-not-allowed text-slate-900 dark:text-white font-medium text-[15px] transition-colors flex items-center justify-center gap-2"
             >
               <Trash2 className="w-4 h-4" />
               Paperera de reciclatge
             </button>
-            {!getCloudUser() && (
+            {(!getCloudUser() || !cloudActionsEnabled) && (
               <p className="text-xs text-slate-400 dark:text-slate-500 mb-2 text-center">
-                Disponible només quan estàs loguejat al núvol.
+                {cloudActionsEnabled ? 'Disponible només quan estàs loguejat al núvol.' : 'Sincronització pausada fins a verificar compatibilitat de les dades xifrades.'}
               </p>
             )}
             <button
               onClick={() => setDbOpen(true)}
-              disabled={!getCloudUser()}
+              disabled={!getCloudUser() || !cloudActionsEnabled}
               className="w-full h-12 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:bg-slate-100 dark:disabled:bg-slate-800/40 disabled:text-slate-400 dark:disabled:text-slate-600 disabled:cursor-not-allowed text-slate-900 dark:text-white font-medium text-[15px] transition-colors flex items-center justify-center gap-2"
             >
               <Database className="w-4 h-4" />
               Visualitza la base de dades
             </button>
-            {!getCloudUser() && (
+            {(!getCloudUser() || !cloudActionsEnabled) && (
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-2 text-center">
-                Disponible només quan estàs loguejat al núvol.
+                {cloudActionsEnabled ? 'Disponible només quan estàs loguejat al núvol.' : 'Sincronització pausada fins a verificar compatibilitat de les dades xifrades.'}
               </p>
             )}
           </div>
@@ -277,7 +312,7 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
                   type={showPin ? 'text' : 'password'}
                   value={pinInput}
                   onChange={(e) => { setPinInput(e.target.value); setPinError(''); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmClear(); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void handleConfirmClear(); }}
                   placeholder="PIN"
                   autoFocus
                   autoCapitalize="none"
@@ -300,10 +335,10 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
               <div className="flex gap-2">
                 <button
                   onClick={handleConfirmClear}
-                  disabled={!pinInput}
+                  disabled={!pinInput || checkingPin}
                   className="flex-1 h-11 rounded-xl bg-red-500 hover:bg-red-400 active:bg-red-600 disabled:bg-slate-100 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-600 text-white font-semibold text-[15px] transition-colors"
                 >
-                  Esborra-ho tot
+                  {checkingPin ? 'Verificant…' : 'Esborra-ho tot'}
                 </button>
                 <button
                   onClick={() => setClearOpen(false)}
@@ -317,6 +352,10 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
         </div>
       )}
       <DatabaseViewerModal open={dbOpen} seedWord={seedWord} onClose={() => setDbOpen(false)} onRecordsChanged={onRecordsChanged} />
+      <CloudReadDiagnosticsModal
+        open={cloudReadDiagnosticsOpen}
+        onClose={() => setCloudReadDiagnosticsOpen(false)}
+      />
       <RecycleBinModal
         open={recycleBinOpen}
         seedWord={seedWord}

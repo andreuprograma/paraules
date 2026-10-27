@@ -54,7 +54,7 @@ export default function RecycleBinModal({ open, seedWord, onClose, onRecordsChan
     setBusyId(record.id);
     setError('');
     try {
-      await restoreDeletedCloudRecord(record.id);
+      await restoreDeletedCloudRecord(record.id, seedWord);
       onRecordsChanged?.();
       await load();
     } catch (restoreError) {
@@ -70,7 +70,7 @@ export default function RecycleBinModal({ open, seedWord, onClose, onRecordsChan
     setBusyId(record.id);
     setError('');
     try {
-      await permanentlyDeleteCloudRecord(record.id);
+      await permanentlyDeleteCloudRecord(record.id, seedWord);
       onRecordsChanged?.();
       await load();
     } catch (deleteError) {

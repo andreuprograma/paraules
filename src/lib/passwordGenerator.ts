@@ -20,7 +20,24 @@ export function normalizeSeed(text: string): string {
   return text.trim().normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function assertWellFormedUnicode(text: string, fieldName: string): void {
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = text.charCodeAt(index + 1);
+      if (nextCodeUnit < 0xdc00 || nextCodeUnit > 0xdfff || Number.isNaN(nextCodeUnit)) {
+        throw new Error(`${fieldName} conté una seqüència Unicode no vàlida.`);
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw new Error(`${fieldName} conté una seqüència Unicode no vàlida.`);
+    }
+  }
+}
+
 export function generatePassword(seedWord: string, baseWord: string, options: PasswordOptions): string {
+  assertWellFormedUnicode(seedWord, 'La paraula mestra');
+  assertWellFormedUnicode(baseWord, 'La paraula base');
   const length = Math.max(2, Math.min(100, Math.floor(options.length)));
   const symbolsCharset = options.allowedSymbols && options.allowedSymbols.length > 0
     ? options.allowedSymbols

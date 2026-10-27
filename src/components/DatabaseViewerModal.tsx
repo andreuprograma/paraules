@@ -86,7 +86,7 @@ export default function DatabaseViewerModal({ open, seedWord, onClose }: Databas
   }, [load, open]);
 
   const filtered = useMemo(() => records.filter((record) => {
-    const searchText = query.trim().toLocaleLowerCase();
+    const searchText = query.toLocaleLowerCase();
     return !searchText || [
       record.baseWord,
       record.comment,
