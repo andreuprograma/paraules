@@ -1,11 +1,10 @@
 import { useState } from 'react';
-import { SlidersHorizontal, X, Eye, EyeOff, Trash2, AlertTriangle, Lock, Sun, Moon, Database, ShieldCheck, Mail } from 'lucide-react';
+import { SlidersHorizontal, X, Eye, EyeOff, Trash2, AlertTriangle, Lock, Sun, Moon, Database,  Mail, RefreshCw } from 'lucide-react';
 import { SavedSettings } from '@/lib/storage';
 import { Theme } from '@/lib/theme';
 import { getCloudUser } from '@/lib/pocketbase';
 import DatabaseViewerModal from './DatabaseViewerModal';
 import RecycleBinModal from './RecycleBinModal';
-import CloudReadDiagnosticsModal from './CloudReadDiagnosticsModal';
 
 interface OptionsPanelProps {
   open: boolean;
@@ -20,18 +19,34 @@ interface OptionsPanelProps {
   seedWord: string;
   onRecordsChanged?: () => void;
   cloudActionsEnabled: boolean;
+  onCompareWithCloud?: () => Promise<number>;
 }
 
-export default function OptionsPanel({ open, settings, messageCount, onChange, onClearAll, verifyPin, onClose, theme, onThemeChange, seedWord, onRecordsChanged, cloudActionsEnabled }: OptionsPanelProps) {
+export default function OptionsPanel({ open, settings, messageCount, onChange, onClearAll, verifyPin, onClose, theme, onThemeChange, seedWord, onRecordsChanged, cloudActionsEnabled, onCompareWithCloud }: OptionsPanelProps) {
   const cloudUser = getCloudUser();
+
+  async function compareWithCloud(): Promise<void> {
+    if (!onCompareWithCloud) return;
+    setComparing(true);
+    setCompareMessage('');
+    try {
+      const total = await onCompareWithCloud();
+      setCompareMessage(total === 0 ? 'Tot coincideix: no hi ha diferències entre aquest dispositiu i el núvol.' : '');
+    } catch (error) {
+      setCompareMessage(error instanceof Error ? error.message : 'No s’ha pogut comparar amb el núvol.');
+    } finally {
+      setComparing(false);
+    }
+  }
   const [showSymbolsInput, setShowSymbolsInput] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState('');
   const [showPin, setShowPin] = useState(false);
   const [dbOpen, setDbOpen] = useState(false);
+  const [comparing, setComparing] = useState(false);
+  const [compareMessage, setCompareMessage] = useState('');
   const [recycleBinOpen, setRecycleBinOpen] = useState(false);
-  const [cloudReadDiagnosticsOpen, setCloudReadDiagnosticsOpen] = useState(false);
   const [checkingPin, setCheckingPin] = useState(false);
 
   function update<K extends keyof SavedSettings>(key: K, value: SavedSettings[K]) {
@@ -235,14 +250,15 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
 
           <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
             <button
-              onClick={() => setCloudReadDiagnosticsOpen(true)}
-              className="mb-2 w-full h-12 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white font-medium text-[15px] transition-colors flex items-center justify-center gap-2"
+              onClick={() => { void compareWithCloud(); }}
+              disabled={!getCloudUser() || !cloudActionsEnabled || !onCompareWithCloud || comparing}
+              className="mb-2 w-full h-12 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:bg-slate-100 dark:disabled:bg-slate-800/40 disabled:text-slate-400 dark:disabled:text-slate-600 disabled:cursor-not-allowed text-slate-900 dark:text-white font-medium text-[15px] transition-colors flex items-center justify-center gap-2"
             >
-              <ShieldCheck className="w-4 h-4" />
-              Diagnòstic de PocketBase (només lectura)
+              <RefreshCw className={`w-4 h-4 ${comparing ? 'animate-spin' : ''}`} />
+              {comparing ? 'Comparant…' : 'Compara local i núvol'}
             </button>
-            <p className="text-xs text-slate-400 dark:text-slate-500 mb-3 text-center">
-              Consulta paginada independent; no activa la sincronització ni modifica registres.
+            <p className="text-xs text-slate-400 dark:text-slate-500 mb-3 text-center" role="status">
+              {compareMessage || 'Mostra les diferències (A i B) i et deixa triar què fer. No canvia res fins que ho confirmes.'}
             </p>
             <button
               onClick={() => setRecycleBinOpen(true)}
@@ -352,10 +368,6 @@ export default function OptionsPanel({ open, settings, messageCount, onChange, o
         </div>
       )}
       <DatabaseViewerModal open={dbOpen} seedWord={seedWord} onClose={() => setDbOpen(false)} onRecordsChanged={onRecordsChanged} />
-      <CloudReadDiagnosticsModal
-        open={cloudReadDiagnosticsOpen}
-        onClose={() => setCloudReadDiagnosticsOpen(false)}
-      />
       <RecycleBinModal
         open={recycleBinOpen}
         seedWord={seedWord}

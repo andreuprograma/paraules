@@ -57,189 +57,6 @@ export interface CloudInspectionRecord {
   updated: string;
 }
 
-export type CloudReadDiagnosticErrorCode =
-  | 'AUTH_REQUIRED'
-  | 'AUTH_FAILED'
-  | 'PERMISSION_DENIED'
-  | 'NETWORK_ERROR'
-  | 'REQUEST_FAILED'
-  | 'INCONSISTENT_RESULT'
-  | 'FOREIGN_RECORD';
-
-export class CloudReadDiagnosticError extends Error {
-  constructor(
-    public readonly code: CloudReadDiagnosticErrorCode,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'CloudReadDiagnosticError';
-  }
-}
-
-export interface CloudReadDiagnosticResult {
-  recordCount: number;
-  firstReadPages: number;
-  secondReadPages: number;
-  uniqueRecordCount: number;
-  repeatedReadStable: boolean;
-}
-
-interface DiagnosticRecord {
-  id: string;
-  user_id: string;
-  updated: string;
-  is_deleted: boolean;
-}
-
-interface DiagnosticPage {
-  page: number;
-  perPage: number;
-  totalItems: number;
-  totalPages: number;
-  items: DiagnosticRecord[];
-}
-
-const DIAGNOSTIC_PAGE_SIZE = 100;
-const DIAGNOSTIC_FIELDS = 'id,user_id,updated,is_deleted';
-
-export async function runCloudReadDiagnostic(): Promise<CloudReadDiagnosticResult> {
-  const user = getCloudUser();
-  if (!user) {
-    throw new CloudReadDiagnosticError('AUTH_REQUIRED', 'Cal iniciar sessió a PocketBase amb el compte de prova.');
-  }
-
-  const firstRead = await readDiagnosticSnapshot(user.id);
-  const secondRead = await readDiagnosticSnapshot(user.id);
-  const firstById = new Map(firstRead.records.map((record) => [record.id, record]));
-  const secondById = new Map(secondRead.records.map((record) => [record.id, record]));
-  const repeatedReadStable = firstById.size === secondById.size &&
-    [...firstById].every(([id, record]) => {
-      const second = secondById.get(id);
-      return second?.updated === record.updated && second.is_deleted === record.is_deleted;
-    });
-
-  if (!repeatedReadStable || firstRead.totalItems !== secondRead.totalItems) {
-    throw new CloudReadDiagnosticError(
-      'INCONSISTENT_RESULT',
-      'Els resultats han canviat entre lectures. Atura’t i repeteix el diagnòstic quan el compte estigui quiet.',
-    );
-  }
-
-  return {
-    recordCount: firstRead.totalItems,
-    firstReadPages: firstRead.pagesRead,
-    secondReadPages: secondRead.pagesRead,
-    uniqueRecordCount: firstById.size,
-    repeatedReadStable,
-  };
-}
-
-async function readDiagnosticSnapshot(userId: string): Promise<{ totalItems: number; pagesRead: number; records: DiagnosticRecord[] }> {
-  const records: DiagnosticRecord[] = [];
-  const seenIds = new Set<string>();
-  let totalItems: number | undefined;
-  let totalPages: number | undefined;
-  let perPage: number | undefined;
-  let pagesRead = 0;
-
-  for (let pageNumber = 1; totalPages === undefined || pageNumber <= totalPages; pageNumber += 1) {
-    assertDiagnosticSession(userId);
-    let response: DiagnosticPage;
-    try {
-      response = await withUserRequest(userId, (requestKey) =>
-        pb.collection(COLLECTION).getList<DiagnosticRecord>(pageNumber, DIAGNOSTIC_PAGE_SIZE, {
-          fields: DIAGNOSTIC_FIELDS,
-          filter: `user_id = "${escapeFilterValue(userId)}"`,
-          sort: 'id',
-          requestKey,
-        }),
-      );
-    } catch (error) {
-      if (getCloudUser()?.id !== userId) {
-        throw new CloudReadDiagnosticError('AUTH_FAILED', 'La sessió ha canviat durant el diagnòstic.');
-      }
-      throw classifyDiagnosticRequestError(error);
-    }
-    assertDiagnosticSession(userId);
-
-    if (!isValidDiagnosticPage(response, pageNumber)) {
-      throw new CloudReadDiagnosticError('INCONSISTENT_RESULT', 'PocketBase ha retornat metadades de paginació inconsistents.');
-    }
-
-    if (totalItems === undefined) {
-      totalItems = response.totalItems;
-      totalPages = response.totalPages;
-      perPage = response.perPage;
-      const expectedPages = Math.ceil(totalItems / perPage);
-      if (totalPages !== expectedPages) {
-        throw new CloudReadDiagnosticError('INCONSISTENT_RESULT', 'El total d’elements i el nombre de pàgines no concorden.');
-      }
-    } else if (response.totalItems !== totalItems || response.totalPages !== totalPages || response.perPage !== perPage) {
-      throw new CloudReadDiagnosticError('INCONSISTENT_RESULT', 'Els totals han canviat durant la lectura paginada.');
-    }
-
-    const expectedItems = Math.max(0, Math.min(response.perPage, response.totalItems - (pageNumber - 1) * response.perPage));
-    if (response.items.length !== expectedItems) {
-      throw new CloudReadDiagnosticError('INCONSISTENT_RESULT', 'Una pàgina conté un nombre d’elements inesperat.');
-    }
-
-    for (const record of response.items) {
-      if (!record || typeof record.id !== 'string' || typeof record.user_id !== 'string' ||
-        typeof record.updated !== 'string' || typeof record.is_deleted !== 'boolean') {
-        throw new CloudReadDiagnosticError('INCONSISTENT_RESULT', 'Una pàgina conté camps de diagnòstic incomplets.');
-      }
-      if (record.user_id !== userId) {
-        throw new CloudReadDiagnosticError('FOREIGN_RECORD', 'La consulta ha retornat un registre que no pertany a la sessió actual.');
-      }
-      if (seenIds.has(record.id)) {
-        throw new CloudReadDiagnosticError('INCONSISTENT_RESULT', 'S’ha detectat un identificador repetit entre pàgines.');
-      }
-      seenIds.add(record.id);
-      records.push(record);
-    }
-    pagesRead += 1;
-  }
-
-  assertDiagnosticSession(userId);
-  if (totalItems === undefined || records.length !== totalItems || seenIds.size !== totalItems) {
-    throw new CloudReadDiagnosticError('INCONSISTENT_RESULT', 'El recompte llegit no concorda amb el total anunciat.');
-  }
-
-  return { totalItems, pagesRead, records };
-}
-
-function isValidDiagnosticPage(value: unknown, requestedPage: number): value is DiagnosticPage {
-  if (!value || typeof value !== 'object') return false;
-  const page = value as Partial<DiagnosticPage>;
-  return page.page === requestedPage &&
-    Number.isInteger(page.perPage) && (page.perPage ?? 0) > 0 &&
-    Number.isInteger(page.totalItems) && (page.totalItems ?? -1) >= 0 &&
-    Number.isInteger(page.totalPages) && (page.totalPages ?? -1) >= 0 &&
-    Array.isArray(page.items);
-}
-
-function classifyDiagnosticRequestError(error: unknown): CloudReadDiagnosticError {
-  const status = error && typeof error === 'object' && 'status' in error
-    ? (error as { status?: unknown }).status
-    : undefined;
-  if (status === 401) {
-    return new CloudReadDiagnosticError('AUTH_FAILED', 'PocketBase ha rebutjat la sessió. Torna a iniciar sessió.');
-  }
-  if (status === 403) {
-    return new CloudReadDiagnosticError('PERMISSION_DENIED', 'El compte no té permís per llegir aquesta col·lecció.');
-  }
-  if (status === 0 || (error && typeof error === 'object' && 'isAbort' in error && error.isAbort)) {
-    return new CloudReadDiagnosticError('NETWORK_ERROR', 'La petició de lectura ha fallat per xarxa o s’ha cancel·lat.');
-  }
-  return new CloudReadDiagnosticError('REQUEST_FAILED', 'La petició de lectura a PocketBase ha fallat.');
-}
-
-function assertDiagnosticSession(userId: string): void {
-  if (getCloudUser()?.id !== userId) {
-    throw new CloudReadDiagnosticError('AUTH_FAILED', 'La sessió ha canviat durant el diagnòstic.');
-  }
-}
-
 export async function listUserRecords(seedWord: string, includeDeleted = false): Promise<DecodedRecord[]> {
   const user = getCloudUser();
   if (!user) throw new Error('Inicia sessió al núvol per consultar les fitxes.');
@@ -381,7 +198,7 @@ export function assertCurrentUser(userId: string): void {
 
 function assertVersionedRecord(record: CloudPasswordRecord): void {
   if (record.type !== PART_A_TYPE) {
-    throw new Error('El registre no és una fitxa de la Part A; no s’ha modificat.');
+    throw new Error('El registre no és una fitxa automàtica; no s’ha modificat.');
   }
 }
 
@@ -696,6 +513,175 @@ export async function mergeLocalWithCloud(
   });
 }
 
+const MESSAGE_SNAPSHOT_PREFIX = 'paraules:part-a-snapshot:';
+
+function messageContentHash(comment: string, options: MessageOptions): string {
+  return CryptoJS.SHA256(JSON.stringify([
+    comment,
+    options.length,
+    options.uppercase,
+    options.lowercase,
+    options.numbers,
+    options.symbols,
+    options.allowedSymbols || '',
+  ])).toString();
+}
+
+function readMessageSnapshots(userId: string): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(`${MESSAGE_SNAPSHOT_PREFIX}${userId}`) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, string> : {};
+  } catch {
+    return {};
+  }
+}
+
+// Còpia del contingut tal com era l'última vegada que local i núvol coincidien.
+function setMessageSnapshot(userId: string, baseWord: string, hash: string | null): void {
+  const snapshots = readMessageSnapshots(userId);
+  const key = CryptoJS.SHA256(baseWord).toString();
+  if (hash) snapshots[key] = hash;
+  else delete snapshots[key];
+  localStorage.setItem(`${MESSAGE_SNAPSHOT_PREFIX}${userId}`, JSON.stringify(snapshots));
+}
+
+export type MessageSyncChangeKind = 'create' | 'push' | 'pull' | 'conflict' | 'missing-cloud';
+export type MessageSyncChoice = 'local' | 'cloud' | 'skip';
+
+export interface MessageSyncChange {
+  id: string;
+  kind: MessageSyncChangeKind;
+  local?: ChatMessage;
+  cloud?: ChatMessage;
+  cloudRecordId?: string;
+  cloudDeleted: boolean;
+  defaultChoice: MessageSyncChoice;
+}
+
+export interface MessageSyncPlan {
+  messages: ChatMessage[];
+  changes: MessageSyncChange[];
+}
+
+// Només llegeix el núvol: no escriu res fins que l'usuari triï cada canvi.
+export async function planMessageSync(
+  seedWord: string,
+  autoHide: boolean,
+  userId: string,
+  localMessages: ChatMessage[] = [],
+): Promise<MessageSyncPlan> {
+  assertCurrentUser(userId);
+
+  return withCloudSyncLock(async () => {
+    const records = await listOwnedRecords(userId);
+    const settled = await Promise.allSettled(records.map(async (record) => ({
+      record,
+      message: await messageFromRecord(record, seedWord, autoHide, userId),
+    })));
+    const decoded = settled.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
+    if (records.length > 0 && decoded.length === 0) {
+      throw new Error('No s’ha pogut desxifrar cap fitxa del núvol amb la paraula mestra actual.');
+    }
+
+    const cloudByBase = new Map<string, { record: CloudPasswordRecord; message: ChatMessage }>();
+    for (const entry of decoded) {
+      const current = cloudByBase.get(entry.message.baseWord);
+      if (!current || (current.record.is_deleted && !entry.record.is_deleted)) {
+        cloudByBase.set(entry.message.baseWord, entry);
+      }
+    }
+
+    const snapshots = readMessageSnapshots(userId);
+    const changes: MessageSyncChange[] = [];
+    const localBases = new Set<string>();
+    const localIds = new Set<string>();
+
+    for (const local of localMessages) {
+      localBases.add(local.baseWord);
+      localIds.add(local.id);
+      const cloudEntry = cloudByBase.get(local.baseWord);
+      const snapshot = snapshots[CryptoJS.SHA256(local.baseWord).toString()];
+      const localHash = messageContentHash(local.comment, local.options);
+
+      if (!cloudEntry) {
+        changes.push({
+          id: local.id,
+          kind: snapshot ? 'missing-cloud' : 'create',
+          local,
+          cloudDeleted: false,
+          defaultChoice: snapshot ? 'skip' : 'local',
+        });
+        continue;
+      }
+
+      const { record, message: cloud } = cloudEntry;
+      const base = { id: local.id, local, cloud, cloudRecordId: record.id, cloudDeleted: record.is_deleted };
+      if (record.is_deleted) {
+        const untouched = snapshot !== undefined && snapshot === localHash;
+        changes.push({ ...base, kind: untouched ? 'pull' : 'conflict', defaultChoice: untouched ? 'cloud' : 'skip' });
+        continue;
+      }
+
+      const cloudHash = messageContentHash(cloud.comment, cloud.options);
+      if (cloudHash === localHash) {
+        if (snapshot !== localHash) setMessageSnapshot(userId, local.baseWord, localHash);
+      } else if (snapshot === cloudHash) {
+        changes.push({ ...base, kind: 'push', defaultChoice: 'local' });
+      } else if (snapshot === localHash) {
+        changes.push({ ...base, kind: 'pull', defaultChoice: 'cloud' });
+      } else {
+        changes.push({ ...base, kind: 'conflict', defaultChoice: 'skip' });
+      }
+    }
+
+    const cloudOnly: ChatMessage[] = [];
+    for (const { record, message } of cloudByBase.values()) {
+      if (record.is_deleted || localBases.has(message.baseWord) || localIds.has(message.id)) continue;
+      cloudOnly.push(message);
+      setMessageSnapshot(userId, message.baseWord, messageContentHash(message.comment, message.options));
+    }
+
+    return { messages: [...localMessages, ...cloudOnly], changes };
+  });
+}
+
+export async function applyMessageChoices(
+  plan: MessageSyncPlan,
+  choices: Record<string, MessageSyncChoice>,
+  seedWord: string,
+  userId: string,
+): Promise<{ messages: ChatMessage[]; unresolved: MessageSyncChange[] }> {
+  let messages = plan.messages;
+  const unresolved: MessageSyncChange[] = [];
+
+  for (const change of plan.changes) {
+    const choice = choices[change.id] ?? 'skip';
+    if (choice === 'skip') {
+      unresolved.push(change);
+      continue;
+    }
+    try {
+      assertCurrentUser(userId);
+      const target = change.local ?? change.cloud;
+      if (!target) throw new Error('Fitxa sense dades.');
+      if (choice === 'local') {
+        if (!change.local) throw new Error('No hi ha còpia local.');
+        if (change.cloudDeleted && change.cloudRecordId) await restoreDeletedCloudRecord(change.cloudRecordId, seedWord);
+        await upsertMessage(change.local, seedWord, userId);
+      } else if (!change.cloud || change.cloudDeleted) {
+        messages = messages.filter((message) => message.id !== change.id);
+        setMessageSnapshot(userId, target.baseWord, null);
+      } else {
+        messages = messages.map((message) => (message.id === change.id ? change.cloud as ChatMessage : message));
+        setMessageSnapshot(userId, change.cloud.baseWord, messageContentHash(change.cloud.comment, change.cloud.options));
+      }
+    } catch {
+      unresolved.push(change);
+    }
+  }
+  return { messages, unresolved };
+}
+
 export async function upsertMessage(message: ChatMessage, seedWord: string, userId: string): Promise<void> {
   assertCurrentUser(userId);
   await withCloudSyncLock(() => upsertMessageInternal(message, seedWord, userId));
@@ -825,6 +811,7 @@ async function upsertMessageInternal(
     }
   }
   assertCurrentUser(userId);
+  setMessageSnapshot(userId, message.baseWord, messageContentHash(message.comment, message.options));
 }
 
 async function findRecordForMessage(
@@ -851,6 +838,7 @@ export async function markMessageDeleted(message: ChatMessage, seedWord: string,
     if (updated && (updated.id !== existing.id || updated.user_id !== userId || !updated.is_deleted)) {
       throw new Error('PocketBase no ha confirmat l’eliminació de la fitxa seleccionada.');
     }
+    setMessageSnapshot(userId, message.baseWord, null);
   });
 }
 

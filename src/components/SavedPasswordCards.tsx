@@ -32,6 +32,7 @@ interface SavedPasswordCardsProps {
   onDirtyChange?: (id: string, dirty: boolean) => void;
   discardRequest?: { n: number; ids: string[] };
   highlightId?: string | null;
+  onHighlight?: (id: string) => void;
   expandId?: string | null;
   expandSignal?: number;
 }
@@ -317,7 +318,7 @@ function SavedPasswordCard({
     } catch (conversionError) {
       setError(conversionError instanceof Error
         ? conversionError.message
-        : 'No s’ha pogut convertir la fitxa a la Part A.');
+        : 'No s’ha pogut convertir la fitxa a automàtica.');
     } finally {
       setBusy(false);
     }
@@ -341,7 +342,7 @@ function SavedPasswordCard({
   }
 
   return (
-    <PasswordCardSurface>
+    <PasswordCardSurface manual>
       <header
         className={`flex items-center gap-2 p-4 ${record ? 'cursor-pointer select-none' : ''}`}
         onClick={toggleExpanded}
@@ -410,7 +411,7 @@ function SavedPasswordCard({
                 </button>
               </div>
               <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-                Introdueix una marca coneguda, un domini o una URL d’imatge com a la Part A.
+                Introdueix una marca coneguda, un domini o una URL d’imatge com a les fitxes automàtiques.
               </p>
               {logoResolvedDomain && <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">Provant el domini <span className="font-mono">{logoResolvedDomain}</span>.</p>}
               {logoLoading && <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Carregant la previsualització…</p>}
@@ -596,7 +597,7 @@ function SavedPasswordCard({
             record ? {
               key: 'regenerate',
               label: 'Torna a generar',
-              title: 'Regenera i converteix a la Part A',
+              title: 'Regenera i converteix a automàtica',
               icon: <RefreshCw className="h-4 w-4" />,
               active: regenerationPanelOpen,
               onClick: openRegenerationOptions,
@@ -619,7 +620,7 @@ function SavedPasswordCard({
           {error && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">{error}</p>}
 
           <div className="mt-3 flex gap-2">
-            <button type="button" disabled={busy} onClick={() => void save()} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 font-medium text-white hover:bg-emerald-500 disabled:opacity-50">
+            <button type="button" disabled={busy || !hasUnsavedChanges} onClick={() => void save()} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 font-medium text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">
               {busy ? 'Desant…' : isDraft ? 'Desa la contrasenya' : 'Desa els canvis'}
             </button>
             {isDraft && (
@@ -652,6 +653,7 @@ export default function SavedPasswordCards({
   onDirtyChange,
   discardRequest,
   highlightId,
+  onHighlight,
   expandId,
   expandSignal = 0,
 }: SavedPasswordCardsProps) {
@@ -683,6 +685,7 @@ export default function SavedPasswordCards({
         <div
           key={record.id}
           data-message-id={record.id}
+          onClickCapture={() => onHighlight?.(record.id)}
           className={`rounded-2xl transition-all ${highlightId === record.id ? 'ring-2 ring-amber-400/80 ring-offset-4 ring-offset-slate-50 dark:ring-offset-slate-950' : ''}`}
         >
           <SavedPasswordCard

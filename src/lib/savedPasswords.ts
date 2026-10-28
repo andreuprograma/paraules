@@ -111,6 +111,7 @@ export async function listCloudSavedPasswords(userId: string): Promise<CloudSave
 export async function syncSavedPassword(
   local: SavedPasswordRecord,
   userId: string,
+  options: { force?: boolean } = {},
 ): Promise<SavedPasswordSyncResult> {
   assertCurrentUser(userId);
   return withCloudSyncLock(async () => {
@@ -125,7 +126,7 @@ export async function syncSavedPassword(
       if (sameCiphertext(current, local)) {
         return { cloudUpdatedAt: current.updated, cloudSnapshot: snapshotFromCloud(current) };
       }
-      if (!sameCloudSnapshot(current, local)) {
+      if (!options.force && !sameCloudSnapshot(current, local)) {
         throw new Error('La contrasenya desada ha canviat en un altre dispositiu. S’ha conservat la còpia local; resol el conflicte abans de sincronitzar.');
       }
 
@@ -144,7 +145,7 @@ export async function syncSavedPassword(
       return { cloudUpdatedAt: updated.updated, cloudSnapshot: snapshotFromCloud(updated) };
     }
 
-    if (local.cloudUpdatedAt) {
+    if (local.cloudUpdatedAt && !options.force) {
       throw new Error('El registre sincronitzat ja no és al núvol. S’ha conservat la còpia local i no s’ha recreat.');
     }
     const created = await withUserRequest(userId, (requestKey) =>
@@ -194,10 +195,34 @@ function recordToLocal(record: CloudSavedPasswordRecord): SavedPasswordRecord {
   };
 }
 
-export async function synchronizeSavedPasswords(
+export type SavedPasswordChangeKind = 'create' | 'push' | 'pull' | 'conflict' | 'missing-cloud';
+export type SavedPasswordChoice = 'local' | 'cloud' | 'skip';
+
+export interface SavedPasswordSyncChange {
+  id: string;
+  kind: SavedPasswordChangeKind;
+  local?: SavedPasswordRecord;
+  cloud?: SavedPasswordRecord;
+  defaultChoice: SavedPasswordChoice;
+}
+
+export interface SavedPasswordSyncPlan {
+  records: SavedPasswordRecord[];
+  changes: SavedPasswordSyncChange[];
+}
+
+function localDiffersFromSnapshot(local: SavedPasswordRecord): boolean {
+  const snapshot = local.cloudSnapshot;
+  if (!snapshot) return true;
+  return JSON.stringify(local.encryptedName) !== JSON.stringify(snapshot.encryptedName) ||
+    JSON.stringify(local.encryptedPassword) !== JSON.stringify(snapshot.encryptedPassword) ||
+    local.deleted !== snapshot.deleted;
+}
+
+export async function planSavedPasswordSync(
   localRecords: SavedPasswordRecord[],
   userId: string,
-): Promise<SavedPasswordRecord[]> {
+): Promise<SavedPasswordSyncPlan> {
   const cloudRecords = await listCloudSavedPasswords(userId);
   const cloudByClientId = new Map<string, CloudSavedPasswordRecord>();
   for (const record of cloudRecords) {
@@ -208,40 +233,102 @@ export async function synchronizeSavedPasswords(
     cloudByClientId.set(clientId, record);
   }
 
-  const merged: SavedPasswordRecord[] = [];
+  const records: SavedPasswordRecord[] = [];
+  const changes: SavedPasswordSyncChange[] = [];
   const localIds = new Set<string>();
   for (const local of localRecords) {
     localIds.add(local.id);
     const cloud = cloudByClientId.get(local.id);
     if (!cloud) {
       if (local.cloudUpdatedAt) {
-        merged.push({ ...local, syncState: 'conflict' });
-        continue;
+        changes.push({ id: local.id, kind: 'missing-cloud', local, defaultChoice: 'skip' });
+        records.push({ ...local, syncState: 'conflict' });
+      } else if (local.syncState === 'local' || local.syncState === 'pending') {
+        changes.push({ id: local.id, kind: 'create', local, defaultChoice: 'local' });
+        records.push(local);
+      } else {
+        records.push(local);
       }
-      if (local.syncState === 'local' || local.syncState === 'pending') {
-        const result = await syncSavedPassword(local, userId);
-        merged.push({ ...local, cloudUpdatedAt: result.cloudUpdatedAt, cloudSnapshot: result.cloudSnapshot, syncState: 'synced' });
-        continue;
-      }
-      merged.push(local);
       continue;
     }
 
     const remote = recordToLocal(cloud);
     if (sameCiphertext(cloud, local)) {
-      merged.push(remote);
-    } else if (sameCloudSnapshot(cloud, local)) {
-      const result = await syncSavedPassword(local, userId);
-      merged.push({ ...local, cloudUpdatedAt: result.cloudUpdatedAt, cloudSnapshot: result.cloudSnapshot, syncState: 'synced' });
+      records.push(remote);
+      continue;
+    }
+    if (!local.cloudSnapshot) {
+      changes.push({ id: local.id, kind: 'conflict', local, cloud: remote, defaultChoice: 'skip' });
+      records.push({ ...local, syncState: 'conflict' });
+      continue;
+    }
+
+    const localChanged = localDiffersFromSnapshot(local);
+    const cloudChanged = !sameCloudSnapshot(cloud, local);
+    if (localChanged && !cloudChanged) {
+      changes.push({ id: local.id, kind: 'push', local, cloud: remote, defaultChoice: 'local' });
+      records.push({ ...local, syncState: 'pending' });
+    } else if (!localChanged && cloudChanged) {
+      changes.push({ id: local.id, kind: 'pull', local, cloud: remote, defaultChoice: 'cloud' });
+      records.push(local);
+    } else if (localChanged && cloudChanged) {
+      changes.push({ id: local.id, kind: 'conflict', local, cloud: remote, defaultChoice: 'skip' });
+      records.push({ ...local, syncState: 'conflict' });
     } else {
-      merged.push({ ...local, syncState: 'conflict' });
+      records.push(remote);
     }
   }
 
   for (const cloud of cloudRecords) {
     const remote = recordToLocal(cloud);
-    if (localIds.has(remote.id)) continue;
-    merged.push(remote);
+    if (!localIds.has(remote.id)) records.push(remote);
   }
-  return merged;
+  return { records, changes };
+}
+
+export async function applySavedPasswordChoices(
+  plan: SavedPasswordSyncPlan,
+  choices: Record<string, SavedPasswordChoice>,
+  userId: string,
+): Promise<{ records: SavedPasswordRecord[]; unresolved: SavedPasswordSyncChange[] }> {
+  const cloudRecords = await listCloudSavedPasswords(userId);
+  const cloudByClientId = new Map(cloudRecords.map((record) => [parsePartBPayload(record.encrypted_password).clientId, record]));
+  let records = plan.records.slice();
+  const unresolved: SavedPasswordSyncChange[] = [];
+
+  for (const change of plan.changes) {
+    const choice = choices[change.id] ?? 'skip';
+    if (choice === 'skip' || !change.local) {
+      unresolved.push(change);
+      continue;
+    }
+    try {
+      if (choice === 'local') {
+        const result = await syncSavedPassword(change.local, userId, { force: true });
+        records = records.map((record) => record.id === change.id
+          ? { ...change.local!, cloudUpdatedAt: result.cloudUpdatedAt, cloudSnapshot: result.cloudSnapshot, syncState: 'synced' }
+          : record);
+      } else {
+        const cloud = cloudByClientId.get(change.id);
+        records = cloud
+          ? records.map((record) => record.id === change.id ? recordToLocal(cloud) : record)
+          : records.filter((record) => record.id !== change.id);
+      }
+    } catch {
+      unresolved.push(change);
+    }
+  }
+  return { records, unresolved };
+}
+
+export async function synchronizeSavedPasswords(
+  localRecords: SavedPasswordRecord[],
+  userId: string,
+): Promise<SavedPasswordRecord[]> {
+  const plan = await planSavedPasswordSync(localRecords, userId);
+  const choices: Record<string, SavedPasswordChoice> = {};
+  for (const change of plan.changes) {
+    if (change.kind === 'create' || change.kind === 'push') choices[change.id] = 'local';
+  }
+  return (await applySavedPasswordChoices(plan, choices, userId)).records;
 }

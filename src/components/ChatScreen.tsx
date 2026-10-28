@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Send, SlidersHorizontal, KeyRound, LockKeyhole, LogOut, Sparkles, Minus, Plus, RotateCcw, Search, ChevronsDownUp, ChevronsUpDown, ArrowUpDown, CloudOff, Cloud, ArrowUpAZ, ArrowDownAZ, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
 import { getCloudUser } from '@/lib/pocketbase';
 import type { PasswordEnvelopeV1 } from '@/lib/passwordEncryption';
-import { decryptSavedPasswordDetails } from '@/lib/savedPasswordCrypto';
-import { syncSavedPassword, synchronizeSavedPasswords } from '@/lib/savedPasswords';
+import { decryptSavedPasswordDetails, encryptSavedPasswordField } from '@/lib/savedPasswordCrypto';
+import { generatePassword } from '@/lib/passwordGenerator';
+import { applySavedPasswordChoices, planSavedPasswordSync, syncSavedPassword } from '@/lib/savedPasswords';
+import type { SavedPasswordChoice, SavedPasswordSyncChange } from '@/lib/savedPasswords';
 import { Theme } from '@/lib/theme';
 import {
   ChatMessage,
@@ -21,7 +23,10 @@ import type { PasswordBubbleChanges } from './PasswordBubble';
 import OptionsPanel from './OptionsPanel';
 import SearchModal from './SearchModal';
 import ImportExportModal from './ImportExportModal';
+import type { ImportSelection } from './ImportExportModal';
 import SavedPasswordCards from './SavedPasswordCards';
+import type { MessageSyncChange, MessageSyncChoice, MessageSyncPlan } from '@/lib/cloudSync';
+import SyncReviewModal from './SyncReviewModal';
 
 interface ChatScreenProps {
   seedWord: string;
@@ -30,7 +35,8 @@ interface ChatScreenProps {
   verifyPin: (pin: string) => Promise<boolean>;
   onLock: () => void;
   cloudStatus: 'offline' | 'syncing' | 'synced' | 'error';
-  onInitialSync?: (messages: ChatMessage[]) => Promise<ChatMessage[]>;
+  onInitialSync?: (messages: ChatMessage[]) => Promise<MessageSyncPlan>;
+  onApplyMessageChoices?: (plan: MessageSyncPlan, choices: Record<string, MessageSyncChoice>) => Promise<{ messages: ChatMessage[]; unresolved: MessageSyncChange[] }>;
   onCloudMessageChange?: (message: ChatMessage) => void;
   onCloudMessageDelete?: (message: ChatMessage) => Promise<void>;
   onCloudLogoChange?: (message: ChatMessage, file: File | undefined, logoUrl: string | undefined) => Promise<string | undefined>;
@@ -56,7 +62,7 @@ function highlightMessage(id: string, setHighlight: (id: string | null) => void)
   window.setTimeout(() => setHighlight(null), 2200);
 }
 
-export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn, focusBaseWordOnMount, onInitialFocusComplete, cloudActionsEnabled }: ChatScreenProps) {
+export default function ChatScreen({ seedWord, defaultSettings, onDefaultSettingsChange, verifyPin, onLock, cloudStatus, onInitialSync, onApplyMessageChoices, onCloudMessageChange, onCloudMessageDelete, onCloudLogoChange, cloudUserId, theme, onThemeChange, onSignOut, onSignIn, focusBaseWordOnMount, onInitialFocusComplete, cloudActionsEnabled }: ChatScreenProps) {
   const [baseWord, setBaseWord] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>(() => getChatMessages(cloudUserId ?? undefined));
   const [cloudOperationError, setCloudOperationError] = useState('');
@@ -82,6 +88,10 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   const [sortMode, setSortMode] = useState<SortMode>('alpha');
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const [syncChanges, setSyncChanges] = useState<SavedPasswordSyncChange[]>([]);
+  const [messageChanges, setMessageChanges] = useState<MessageSyncChange[]>([]);
+  const [syncReviewOpen, setSyncReviewOpen] = useState(false);
+  const [syncReviewBusy, setSyncReviewBusy] = useState(false);
   const dirtyCardsRef = useRef(new Set<string>());
   const [pendingSwitch, setPendingSwitch] = useState<{ ids: string[]; proceed: () => void } | null>(null);
   const [discardRequest, setDiscardRequest] = useState<{ n: number; ids: string[] }>({ n: 0, ids: [] });
@@ -137,15 +147,17 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     if (!savedPasswordRecordsLoaded || !savedPasswordRecordsAvailable || !cloudActionsEnabled || !cloudUserId || savedPasswordSyncStartedRef.current) return;
     savedPasswordSyncStartedRef.current = true;
     setSavedPasswordSyncState('syncing');
-    synchronizeSavedPasswords(savedPasswordRecords, cloudUserId).then((records) => {
+    planSavedPasswordSync(savedPasswordRecords, cloudUserId).then((plan) => {
       if (sessionUserIdRef.current !== cloudUserId || getCloudUser()?.id !== cloudUserId) return;
-      setSavedPasswordRecordsState(records);
-      setSavedPasswordSyncState(records.some((record) => record.syncState === 'conflict')
-        ? 'conflict'
-        : records.some((record) => record.syncState === 'pending') ? 'error' : 'synced');
-      setSavedPasswordError(records.some((record) => record.syncState === 'conflict')
-        ? 'Hi ha conflictes entre dispositius. Les còpies s’han conservat i no s’han sobreescrit automàticament.'
-        : '');
+      setSavedPasswordRecordsState(plan.records);
+      setSyncChanges(plan.changes);
+      if (plan.changes.length > 0) {
+        setSavedPasswordSyncState('conflict');
+        setSyncReviewOpen(true);
+      } else {
+        setSavedPasswordSyncState(plan.records.some((record) => record.syncState === 'pending') ? 'error' : 'synced');
+      }
+      setSavedPasswordError('');
     }).catch(() => {
       if (sessionUserIdRef.current !== cloudUserId) return;
       setSavedPasswordSyncState('error');
@@ -158,6 +170,77 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   useEffect(() => {
     savedPasswordSyncStartedRef.current = false;
   }, [cloudUserId]);
+
+  async function handleCompareWithCloud(): Promise<number> {
+    if (!cloudUserId || !onInitialSync || getCloudUser()?.id !== cloudUserId) {
+      throw new Error('Inicia sessió al núvol per comparar.');
+    }
+    const [bPlan, aPlan] = await Promise.all([
+      planSavedPasswordSync(savedPasswordRecords, cloudUserId),
+      onInitialSync(messages),
+    ]);
+    if (getCloudUser()?.id !== cloudUserId) throw new Error('La sessió del compte ha canviat.');
+    setSavedPasswordRecordsState(bPlan.records);
+    setSyncChanges(bPlan.changes);
+    setMessages(aPlan.messages);
+    setMessageChanges(aPlan.changes);
+    setSavedPasswordSyncState(bPlan.changes.length > 0 ? 'conflict' : 'synced');
+    const total = bPlan.changes.length + aPlan.changes.length;
+    if (total > 0) {
+      setOptionsOpen(false);
+      setSyncReviewOpen(true);
+    }
+    return total;
+  }
+
+  async function handleApplySyncReview(choices: Record<string, SavedPasswordChoice>): Promise<void> {
+    setSyncReviewBusy(true);
+    const pick = (part: 'A' | 'B') => Object.fromEntries(
+      Object.entries(choices).filter(([key]) => key.startsWith(`${part}:`)).map(([key, value]) => [key.slice(2), value]),
+    ) as Record<string, SavedPasswordChoice>;
+    let remainingB = syncChanges;
+    let remainingA = messageChanges;
+    let failed = false;
+    try {
+      if (cloudUserId && syncChanges.length > 0) {
+        try {
+          const { records, unresolved } = await applySavedPasswordChoices(
+            { records: savedPasswordRecords, changes: syncChanges },
+            pick('B'),
+            cloudUserId,
+          );
+          if (getCloudUser()?.id !== cloudUserId) return;
+          setSavedPasswordRecordsState(records);
+          setSyncChanges(unresolved);
+          remainingB = unresolved;
+          setSavedPasswordSyncState(unresolved.length > 0 ? 'conflict' : 'synced');
+          setSavedPasswordError('');
+        } catch {
+          failed = true;
+          setSavedPasswordSyncState('error');
+          setSavedPasswordError('No s’han pogut aplicar els canvis de sincronització. Les còpies s’han conservat.');
+        }
+      }
+      if (cloudUserId && messageChanges.length > 0 && onApplyMessageChoices) {
+        try {
+          const { messages: nextMessages, unresolved } = await onApplyMessageChoices({ messages, changes: messageChanges }, pick('A'));
+          if (getCloudUser()?.id !== cloudUserId) return;
+          setMessages(nextMessages);
+          setMessageChanges(unresolved);
+          remainingA = unresolved;
+          setCloudOperationError('');
+        } catch {
+          failed = true;
+          setCloudOperationError('No s’han pogut aplicar els canvis de sincronització de les fitxes automàtiques. Les còpies s’han conservat.');
+        }
+      }
+      const chosen = (part: 'A' | 'B', id: string) => (choices[`${part}:${id}`] ?? 'skip') !== 'skip';
+      const stillPending = remainingB.some((change) => chosen('B', change.id)) || remainingA.some((change) => chosen('A', change.id));
+      setSyncReviewOpen(failed || stillPending);
+    } finally {
+      setSyncReviewBusy(false);
+    }
+  }
 
   function updateSavedPasswordRecord(id: string, update: Partial<SavedPasswordRecord>): void {
     setSavedPasswordRecordsState((current) => current.map((record) =>
@@ -265,44 +348,32 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     setExpandOneId(message.id);
     setExpandOneSignal((current) => current + 1);
     setSavedPasswordError('');
-    scrollToMessage(message.id, true);
+    scrollToMessage(message.id);
     onCloudMessageChange?.(message);
   }
 
-  function scrollToMessage(id: string, center = false) {
+  // Deixa la fitxa a la part alta perquè els panells de confirmació que es despleguen sota quedin visibles.
+  function scrollToMessage(id: string) {
     window.requestAnimationFrame(() => {
       const container = scrollRef.current;
       const message = Array.from(container?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])
         .find((element) => element.dataset.messageId === id);
       if (!container || !message) return;
 
-      const containerRect = container.getBoundingClientRect();
-      const messageRect = message.getBoundingClientRect();
-      const visibleTop = containerRect.top + 8;
-      const visibleBottom = containerRect.bottom - 8;
-      const visibleHeight = visibleBottom - visibleTop;
-      let scrollDelta = 0;
-
-      if (center && messageRect.height <= visibleHeight) {
-        scrollDelta = messageRect.top + messageRect.height / 2 - (visibleTop + visibleHeight / 2);
-      } else if (messageRect.top < visibleTop) {
-        scrollDelta = messageRect.top - visibleTop;
-      } else if (messageRect.top >= visibleBottom) {
-        scrollDelta = messageRect.top - visibleTop;
-      } else if (messageRect.height <= visibleHeight && messageRect.bottom > visibleBottom) {
-        scrollDelta = messageRect.bottom - visibleBottom;
-      }
-
-      if (scrollDelta !== 0) container.scrollBy({ top: scrollDelta, behavior: 'smooth' });
+      const topOffset = window.matchMedia('(min-width: 640px)').matches ? 32 : 8;
+      const scrollDelta = message.getBoundingClientRect().top - (container.getBoundingClientRect().top + topOffset);
+      if (Math.abs(scrollDelta) > 2) container.scrollBy({ top: scrollDelta, behavior: 'smooth' });
     });
   }
 
   useEffect(() => {
     if (!onInitialSync || initialSyncStartedRef.current) return;
     initialSyncStartedRef.current = true;
-    onInitialSync(messages).then((syncedMessages) => {
+    onInitialSync(messages).then((plan) => {
       if (sessionUserIdRef.current === cloudUserId && (!cloudUserId || getCloudUser()?.id === cloudUserId)) {
-        setMessages(syncedMessages);
+        setMessages(plan.messages);
+        setMessageChanges(plan.changes);
+        if (plan.changes.length > 0) setSyncReviewOpen(true);
         setCloudOperationError('');
       }
     }).catch((error: unknown) => {
@@ -322,9 +393,11 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   useEffect(() => {
     function onReload() {
       if (onInitialSync) {
-        onInitialSync(getChatMessages(cloudUserId ?? undefined)).then((syncedMessages) => {
+        onInitialSync(getChatMessages(cloudUserId ?? undefined)).then((plan) => {
           if (sessionUserIdRef.current === cloudUserId && (!cloudUserId || getCloudUser()?.id === cloudUserId)) {
-            setMessages(syncedMessages);
+            setMessages(plan.messages);
+            setMessageChanges(plan.changes);
+            if (plan.changes.length > 0) setSyncReviewOpen(true);
             setCloudOperationError('');
           }
         }).catch((error: unknown) => {
@@ -365,7 +438,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
       setExpandOneId(existing.id);
       setExpandOneSignal((n) => n + 1);
       setExpandedMessageIds((current) => new Set(current).add(existing.id));
-      scrollToMessage(existing.id, true);
+      scrollToMessage(existing.id);
       highlightMessage(existing.id, setHighlightId);
       setBaseWord('');
       return;
@@ -385,7 +458,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     setExpandOneId(msg.id);
     setExpandOneSignal((n) => n + 1);
     setExpandedMessageIds((current) => new Set(current).add(msg.id));
-    scrollToMessage(msg.id, true);
+    scrollToMessage(msg.id);
     onCloudMessageChange?.(msg);
     setBaseWord('');
     setCurrentSettings(defaultSettings);
@@ -411,10 +484,55 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     setHighlightId((current) => current === id ? null : current);
   }
 
+  async function handleConvertMessageToPartB(id: string): Promise<void> {
+    const message = messages.find((item) => item.id === id);
+    if (!message || !savedPasswordRecordsAvailable) {
+      throw new Error('No s’ha pogut trobar la fitxa o llegir les dades locals. No s’ha fet cap conversió.');
+    }
+    // El xifrat va primer: si falla, no es toca res.
+    const [encryptedName, encryptedPassword] = await Promise.all([
+      encryptSavedPasswordField(message.baseWord, seedWord, 'name', {
+        notes: message.comment,
+        icon: message.icon ?? '',
+        logoUrl: message.logoUrl,
+      }),
+      encryptSavedPasswordField(generatePassword(seedWord, message.baseWord, message.options), seedWord, 'password'),
+    ]);
+    const now = new Date().toISOString();
+    const record: SavedPasswordRecord = {
+      id: crypto.randomUUID(),
+      encryptedName,
+      encryptedPassword,
+      createdAt: message.createdAt ?? now,
+      updatedAt: now,
+      syncState: cloudUserId ? 'pending' : 'local',
+      deleted: false,
+    };
+    try {
+      if (onCloudMessageDelete) await onCloudMessageDelete(message);
+    } catch (deleteError) {
+      throw new Error(deleteError instanceof Error
+        ? `No s’ha pogut esborrar la fitxa automàtica; no s’ha fet cap conversió. ${deleteError.message}`
+        : 'No s’ha pogut esborrar la fitxa automàtica; no s’ha fet cap conversió.');
+    }
+    setMessages((current) => current.filter((item) => item.id !== id));
+    setExpandedMessageIds((current) => {
+      const next = new Set(current);
+      next.delete(id);
+      next.add(record.id);
+      return next;
+    });
+    setSavedPasswordRecordsState((current) => [...current, record]);
+    setExpandOneId(record.id);
+    setExpandOneSignal((current) => current + 1);
+    scrollToMessage(record.id);
+    await synchronizeOneSavedPassword(record);
+  }
+
   async function handleSaveMessageChanges(id: string, changes: PasswordBubbleChanges): Promise<void> {
     const message = messages.find((item) => item.id === id);
     if (!message || message.password !== undefined) {
-      throw new Error('No s’ha pogut actualitzar aquesta fitxa de la Part A.');
+      throw new Error('No s’ha pogut actualitzar aquesta fitxa automàtica.');
     }
     const updatedMessage: ChatMessage = {
       ...message,
@@ -453,8 +571,17 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     setCurrentSettings((s) => ({ ...s, [key]: !s[key] }));
   }
 
-  function handleSearchSelect(id: string) {
-    guardSwitch(id, () => performSearchSelect(id));
+  function handleSearchSelect(id: string, kind: 'A' | 'B') {
+    guardSwitch(id, () => {
+      if (kind === 'B') {
+        highlightMessage(id, setHighlightId);
+        setSavedExpandId(id);
+        setSavedExpandSignal((n) => n + 1);
+        scrollToMessage(id);
+      } else {
+        performSearchSelect(id);
+      }
+    });
   }
 
   function performSearchSelect(id: string) {
@@ -486,32 +613,55 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     }
   }
 
-  function handleImport(rows: { baseWord: string; options: MessageOptions; comment: string }[]) {
-    setMessages((current) => {
-      const next = [...current];
-      for (const row of rows) {
-        const idx = next.findIndex((m) => m.baseWord === row.baseWord);
-        const now = new Date().toISOString();
-        const msg: ChatMessage = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          baseWord: row.baseWord,
-          autoHide: currentSettings.autoHide,
-          comment: row.comment,
-          options: row.options,
-          createdAt: now,
-          updatedAt: now,
-        };
-        if (idx >= 0) {
-          const updatedMessage = { ...next[idx], ...msg, id: next[idx].id };
-          next[idx] = updatedMessage;
-          onCloudMessageChange?.(updatedMessage);
-        } else {
-          next.push(msg);
-          onCloudMessageChange?.(msg);
+  async function handleImport(selection: ImportSelection): Promise<void> {
+    if (selection.manual.length > 0 && !savedPasswordRecordsAvailable) {
+      throw new Error('No s’han pogut llegir les dades locals anteriors; no s’ha importat cap fitxa manual.');
+    }
+    // El xifrat va primer: si falla, no es toca res.
+    const encryptedManual = await Promise.all(selection.manual.map(async ({ entry, replaceId }) => ({
+      replaceId,
+      name: await encryptSavedPasswordField(entry.name, seedWord, 'name', {
+        notes: entry.notes,
+        icon: entry.icon,
+        logoUrl: entry.logoUrl,
+      }),
+      password: await encryptSavedPasswordField(entry.password, seedWord, 'password'),
+    })));
+
+    if (selection.automatic.length > 0) {
+      setMessages((current) => {
+        const next = [...current];
+        for (const row of selection.automatic) {
+          const idx = next.findIndex((m) => m.baseWord === row.baseWord);
+          const now = new Date().toISOString();
+          const msg: ChatMessage = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            baseWord: row.baseWord,
+            autoHide: currentSettings.autoHide,
+            comment: row.comment,
+            options: row.options,
+            ...(row.icon ? { icon: row.icon } : {}),
+            ...(row.logoUrl ? { logoUrl: row.logoUrl } : {}),
+            createdAt: now,
+            updatedAt: now,
+          };
+          if (idx >= 0) {
+            const updatedMessage = { ...next[idx], ...msg, id: next[idx].id };
+            next[idx] = updatedMessage;
+            onCloudMessageChange?.(updatedMessage);
+          } else {
+            next.push(msg);
+            onCloudMessageChange?.(msg);
+          }
         }
-      }
-      return next;
-    });
+        return next;
+      });
+    }
+
+    for (const item of encryptedManual) {
+      if (item.replaceId) await handleUpdateSavedPassword(item.replaceId, item.name, item.password);
+      else await handleSavePassword(item.name, item.password);
+    }
   }
 
   const charsetButtons = [
@@ -537,6 +687,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
   }, [messages, sortMode]);
 
   const [savedPasswordNames, setSavedPasswordNames] = useState<Record<string, string>>({});
+  const [savedPasswordNotes, setSavedPasswordNotes] = useState<Record<string, string>>({});
   const [savedExpandId, setSavedExpandId] = useState<string | null>(null);
   const [savedExpandSignal, setSavedExpandSignal] = useState(0);
   useEffect(() => {
@@ -544,13 +695,16 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
     const activeRecords = savedPasswordRecords.filter((record) => !record.deleted);
     Promise.all(activeRecords.map(async (record) => {
       try {
-        return [record.id, (await decryptSavedPasswordDetails(record.encryptedName, seedWord)).name] as const;
+        const details = await decryptSavedPasswordDetails(record.encryptedName, seedWord);
+        return [record.id, details.name, details.notes] as const;
       } catch {
         return null;
       }
     })).then((entries) => {
       if (!active) return;
-      setSavedPasswordNames(Object.fromEntries(entries.filter((entry) => entry !== null)));
+      const valid = entries.filter((entry) => entry !== null);
+      setSavedPasswordNames(Object.fromEntries(valid.map(([id, name]) => [id, name])));
+      setSavedPasswordNotes(Object.fromEntries(valid.map(([id, , notes]) => [id, notes])));
     });
     return () => { active = false; };
   }, [savedPasswordRecords, seedWord]);
@@ -617,7 +771,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
       setExpandOneSignal((n) => n + 1);
       setExpandedMessageIds((current) => new Set(current).add(s.id));
     }
-    scrollToMessage(s.id, true);
+    scrollToMessage(s.id);
     setBaseWord('');
     setActiveSuggestionIdx(-1);
   }
@@ -704,7 +858,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
               {viewMenuOpen && (
                 <div className="fixed right-2 top-14 z-40 w-56 rounded-xl border border-slate-200 bg-white p-2 shadow-lg dark:border-slate-700 dark:bg-slate-900">
                   <p className="px-2 pb-1 text-xs font-semibold uppercase text-slate-400">Mostra</p>
-                  {([['all', 'Totes'], ['A', 'Només Part A'], ['B', 'Només Part B']] as const).map(([value, label]) => (
+                  {([['all', 'Totes'], ['A', 'Només automàtiques'], ['B', 'Només manuals']] as const).map(([value, label]) => (
                     <button key={value} type="button" onClick={() => setTypeFilter(value)} aria-pressed={typeFilter === value} className={`w-full rounded-lg px-2 py-2 text-left text-sm ${typeFilter === value ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200' : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'}`}>{label}</button>
                   ))}
                   <p className="px-2 pb-1 pt-2 text-xs font-semibold uppercase text-slate-400">Ordena</p>
@@ -740,10 +894,16 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
         </div>
       </header>
 
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 overscroll-contain">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 pt-4 pb-[45dvh] overscroll-contain">
         {!cloudActionsEnabled && cloudUserId && (
           <div role="status" className="mx-auto mb-4 max-w-2xl rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
             La sincronització i les eines del núvol estan pausades. La clau antiga de PocketBase deriva la paraula mestra normalitzada; s’han pausat les operacions per evitar sobreescriure dades o crear duplicats.
+          </div>
+        )}
+        {syncChanges.length + messageChanges.length > 0 && !syncReviewOpen && (
+          <div role="status" className="mx-auto mb-4 flex max-w-2xl items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            <span>Hi ha {syncChanges.length + messageChanges.length} {syncChanges.length + messageChanges.length === 1 ? 'fitxa' : 'fitxes'} pendents de revisar entre aquest dispositiu i el núvol.</span>
+            <button type="button" onClick={() => setSyncReviewOpen(true)} className="ml-auto shrink-0 font-semibold underline">Revisa</button>
           </div>
         )}
         {savedPasswordError && (
@@ -812,6 +972,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                   updatedAt={item.message.updatedAt}
                   onSaveChanges={(changes) => handleSaveMessageChanges(item.message.id, changes)}
                   onDelete={() => { void handleDelete(item.message.id); }}
+                  onConvertToPartB={() => handleConvertMessageToPartB(item.message.id)}
                   onHighlight={() => highlightMessage(item.message.id, setHighlightId)}
                   guardSwitch={guardSwitch}
                   onDirtyChange={reportDirty}
@@ -838,6 +999,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                 onDirtyChange={reportDirty}
                 discardRequest={discardRequest}
                 highlightId={highlightId}
+                onHighlight={(id) => highlightMessage(id, setHighlightId)}
                 expandId={savedExpandId}
                 expandSignal={savedExpandSignal}
               />
@@ -892,7 +1054,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                   <li key={s.id}>
                     <button type="button" onClick={() => selectSuggestion(i)} onMouseEnter={() => setActiveSuggestionIdx(i)} className={`w-full text-left px-4 py-2.5 text-sm flex items-center justify-between gap-3 transition-colors ${i === activeSuggestionIdx ? 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-900 dark:text-emerald-100' : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>
                       <span className="font-medium truncate">{s.baseWord}</span>
-                      <span className="text-xs text-slate-400 dark:text-slate-500 shrink-0">{s.kind === 'B' ? 'Obre fitxa B' : 'Obre fitxa'}</span>
+                      <span className="text-xs text-slate-400 dark:text-slate-500 shrink-0">{s.kind === 'B' ? 'Obre fitxa manual' : 'Obre fitxa automàtica'}</span>
                     </button>
                   </li>
                 ))}
@@ -909,8 +1071,8 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
               setNewSavedPasswordDraft({ id: crypto.randomUUID(), password: baseWord });
             })}
             className="w-12 h-12 flex-shrink-0 rounded-2xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 flex items-center justify-center transition-colors"
-            aria-label="Desa a la Part B"
-            title="Desa una contrasenya manualment a la Part B"
+            aria-label="Desa una fitxa manual"
+            title="Desa una contrasenya manualment (fitxa manual)"
           >
             <LockKeyhole className="w-5 h-5" />
           </button>
@@ -933,7 +1095,18 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
         onThemeChange={onThemeChange}
         seedWord={seedWord}
         onRecordsChanged={reloadLocalMessages}
+        onCompareWithCloud={handleCompareWithCloud}
       />
+      {syncReviewOpen && syncChanges.length + messageChanges.length > 0 && (
+        <SyncReviewModal
+          changes={syncChanges}
+          messageChanges={messageChanges}
+          seedWord={seedWord}
+          busy={syncReviewBusy}
+          onApply={(choices) => { void handleApplySyncReview(choices); }}
+          onLater={() => setSyncReviewOpen(false)}
+        />
+      )}
       {pendingSwitch && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" role="dialog" aria-modal="true" aria-labelledby="unsaved-title">
           <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl dark:bg-slate-900">
@@ -948,7 +1121,7 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
                 onClick={() => {
                   const firstId = pendingSwitch.ids[0];
                   setPendingSwitch(null);
-                  scrollToMessage(firstId, true);
+                  scrollToMessage(firstId);
                   highlightMessage(firstId, setHighlightId);
                 }}
                 className="h-10 flex-1 rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-500"
@@ -972,8 +1145,8 @@ export default function ChatScreen({ seedWord, defaultSettings, onDefaultSetting
           </div>
         </div>
       )}
-      <SearchModal open={searchOpen} messages={messages} onClose={() => setSearchOpen(false)} onSelect={handleSearchSelect} />
-      <ImportExportModal open={importOpen} messages={messages} onImport={handleImport} onClose={() => setImportOpen(false)} />
+      <SearchModal open={searchOpen} messages={messages} manualItems={savedPasswordRecords.filter((record) => !record.deleted).map((record) => ({ id: record.id, name: savedPasswordNames[record.id] ?? '', notes: savedPasswordNotes[record.id] ?? '' }))} onClose={() => setSearchOpen(false)} onSelect={handleSearchSelect} />
+      <ImportExportModal open={importOpen} messages={messages} manualRecords={savedPasswordRecords} seedWord={seedWord} onImport={handleImport} onClose={() => setImportOpen(false)} />
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Copy, Check, Eye, EyeOff, RefreshCw, Trash2, MessageSquare, AlertTriangle, AlertCircle, ChevronDown, ChevronUp, Image } from 'lucide-react';
+import { Copy, Check, Eye, EyeOff, RefreshCw, Trash2, MessageSquare, AlertTriangle, AlertCircle, ChevronDown, ChevronUp, Image, KeyRound } from 'lucide-react';
 import { estimateStrength, generatePassword } from '@/lib/passwordGenerator';
 import { resolveLogoInput } from '@/lib/logo';
 import { MessageOptions } from '@/lib/storage';
@@ -35,6 +35,7 @@ interface PasswordBubbleProps {
   updatedAt?: string;
   onSaveChanges: (changes: PasswordBubbleChanges) => Promise<void>;
   onDelete: () => void;
+  onConvertToPartB?: () => Promise<void>;
   onHighlight?: () => void;
   guardSwitch?: (targetId: string | null, proceed: () => void) => void;
   onDirtyChange?: (id: string, dirty: boolean) => void;
@@ -74,6 +75,7 @@ export default function PasswordBubble({
   onDelete,
   onHighlight,
   guardSwitch,
+  onConvertToPartB,
   onDirtyChange,
   discardRequest,
 }: PasswordBubbleProps) {
@@ -84,6 +86,9 @@ export default function PasswordBubble({
   const [commentDraft, setCommentDraft] = useState(comment);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [convertOpen, setConvertOpen] = useState(false);
+  const [converting, setConverting] = useState(false);
+  const [convertError, setConvertError] = useState('');
   const [symbolsPanelOpen, setSymbolsPanelOpen] = useState(false);
   const [logoPanelOpen, setLogoPanelOpen] = useState(false);
   const [logoQuery, setLogoQuery] = useState('');
@@ -145,10 +150,10 @@ export default function PasswordBubble({
   }, [logoQuery, setLogoPreview]);
 
   useEffect(() => {
-    if ((confirmOpen || deleteOpen) && confirmRef.current) {
+    if ((confirmOpen || deleteOpen || convertOpen) && confirmRef.current) {
       confirmRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
-  }, [confirmOpen, deleteOpen]);
+  }, [confirmOpen, deleteOpen, convertOpen]);
 
   useEffect(() => {
     if (collapseAllSignal > 0) setCollapsed(true);
@@ -285,6 +290,19 @@ export default function PasswordBubble({
     };
     if (expanding && guardSwitch) guardSwitch(messageId, apply);
     else apply();
+  }
+
+  async function confirmConvert() {
+    if (!onConvertToPartB) return;
+    setConverting(true);
+    setConvertError('');
+    try {
+      await onConvertToPartB();
+    } catch (error) {
+      setConvertError(error instanceof Error ? error.message : 'No s’ha pogut convertir la fitxa.');
+    } finally {
+      setConverting(false);
+    }
   }
 
   function confirmDelete() {
@@ -514,8 +532,36 @@ export default function PasswordBubble({
               },
             },
             { key: 'regenerate', label: 'Torna a generar', title: !canRegenerate ? 'La configuració actual coincideix amb la de la contrasenya' : undefined, icon: <RefreshCw className="h-4 w-4" />, disabled: !canRegenerate, onClick: handleRegenerateClick },
+            ...(onConvertToPartB ? [{
+              key: 'convert',
+              label: 'Converteix a manual',
+              title: hasUnsavedChanges ? 'Desa els canvis abans de convertir' : 'Converteix a manual',
+              icon: <KeyRound className="h-4 w-4" />,
+              disabled: hasUnsavedChanges || converting,
+              onClick: () => { setConvertError(''); setConvertOpen((open) => !open); },
+            }] : []),
             { key: 'delete', label: 'Esborra', title: 'Esborra', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setDeleteOpen(true) },
           ]} />
+
+          {convertOpen && !hasUnsavedChanges && (
+            <div ref={confirmRef} className="mt-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 p-3">
+              <div className="flex items-start gap-2 mb-3">
+                <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+                <p className="text-sm text-amber-800 dark:text-amber-200 leading-relaxed">
+                  Convertir <span className="font-semibold">{baseWord}</span> en fitxa manual? La contrasenya actual es mantindrà igual, però es desarà xifrada i ja no es tornarà a generar. La fitxa automàtica s’esborrarà.
+                </p>
+              </div>
+              {convertError && <p role="alert" className="mb-2 text-sm text-red-700 dark:text-red-300">{convertError}</p>}
+              <div className="flex gap-2">
+                <button type="button" disabled={converting} onClick={() => void confirmConvert()} className="flex-1 h-9 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-sm font-semibold transition-colors">
+                  {converting ? 'Convertint…' : 'Sí, converteix'}
+                </button>
+                <button type="button" disabled={converting} onClick={() => setConvertOpen(false)} className="flex-1 h-9 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-900 dark:text-white text-sm font-medium transition-colors">
+                  Cancel·la
+                </button>
+              </div>
+            </div>
+          )}
 
           {deleteOpen && (
             <div ref={confirmRef} className="mt-3 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800/60 p-3">

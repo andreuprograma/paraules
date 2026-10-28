@@ -65,11 +65,19 @@ export function PasswordCardActions({ actions }: PasswordCardActionsProps) {
 
 interface PasswordCardSurfaceProps {
   children: ReactNode;
+  manual?: boolean;
 }
 
-export function PasswordCardSurface({ children }: PasswordCardSurfaceProps) {
+export function PasswordCardSurface({ children, manual = false }: PasswordCardSurfaceProps) {
   return (
-    <article className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
+    <article
+      data-card-kind={manual ? 'manual' : 'automatic'}
+      className={`rounded-2xl border shadow-sm ${
+        manual
+          ? 'border-indigo-200 bg-indigo-50/70 dark:border-indigo-900/70 dark:bg-indigo-950/30'
+          : 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800'
+      }`}
+    >
       {children}
     </article>
   );

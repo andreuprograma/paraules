@@ -277,7 +277,7 @@ test('Part A cards do not expose the Part B save action and Part B syncs only wh
 
 test('Part B opens an editable password card with encrypted metadata and matching actions', () => {
   assert.match(chatScreenSource, /setNewSavedPasswordDraft\(\{ id: crypto\.randomUUID\(\), password: baseWord \}\)/);
-  assert.match(chatScreenSource, /aria-label="Desa a la Part B"/);
+  assert.match(chatScreenSource, /aria-label="Desa una fitxa manual"/);
   assert.match(savedPasswordCardsSource, /initialPassword=\{draft\.password\}/);
   assert.match(savedPasswordCardsSource, /Nom o servei/);
   assert.match(savedPasswordCardsSource, /Observacions/);
@@ -315,7 +315,7 @@ test('confirming regeneration converts the saved entry into a Part A message', (
 
 test('Part A and Part B cards share their surface, icon, and aligned action bar', () => {
   assert.match(passwordBubbleSource, /<PasswordCardSurface>/);
-  assert.match(savedPasswordCardsSource, /<PasswordCardSurface>/);
+  assert.match(savedPasswordCardsSource, /<PasswordCardSurface manual>/);
   assert.match(passwordBubbleSource, /<PasswordCardIcon/);
   assert.match(savedPasswordCardsSource, /<PasswordCardIcon/);
   assert.match(passwordBubbleSource, /<PasswordCardActions actions=\{\[/);
@@ -330,8 +330,8 @@ test('settings show the logged-in email and the main screen counts visible Part 
   assert.match(chatScreenSource, /visibleRecordCount = displayItems\.length \+ \(showDraft \? 1 : 0\)/);
   assert.match(chatScreenSource, /typeFilter !== 'B'/);
   assert.match(chatScreenSource, /typeFilter !== 'A'/);
-  assert.match(chatScreenSource, /Només Part A/);
-  assert.match(chatScreenSource, /Només Part B/);
+  assert.match(chatScreenSource, /Només automàtiques/);
+  assert.match(chatScreenSource, /Només manuals/);
   assert.match(chatScreenSource, /Per entrada/);
   assert.match(chatScreenSource, /registre mostrat/);
   assert.match(chatScreenSource, /registres mostrats/);
@@ -343,7 +343,169 @@ test('switching cards with unsaved edits asks for confirmation before discarding
   assert.match(chatScreenSource, /Continua editant/);
   assert.match(chatScreenSource, /guardSwitch\(existing\?\.id \?\? null/);
   assert.match(chatScreenSource, /guardSwitch\(s\.id/);
-  assert.match(chatScreenSource, /guardSwitch\(id, \(\) => performSearchSelect/);
+  assert.match(chatScreenSource, /handleSearchSelect\(id: string, kind: 'A' \| 'B'\) \{\s*guardSwitch\(id, \(\) => \{[\s\S]*performSearchSelect\(id\)/);
   assert.match(passwordBubbleSource, /guardSwitch\(messageId, apply\)/);
   assert.match(savedPasswordCardsSource, /guardSwitch\(record\.id, apply\)/);
+});
+
+test('a record deleted in the cloud and unchanged locally is a pull, not a conflict', async () => {
+  const mock = setMock();
+  const local = await makeLocalRecord();
+  const [synced] = await savedPasswords.synchronizeSavedPasswords([local], 'account-a');
+  mock.records[0].is_deleted = true;
+
+  const plan = await savedPasswords.planSavedPasswordSync([synced], 'account-a');
+  assert.equal(plan.changes.length, 1);
+  assert.equal(plan.changes[0].kind, 'pull');
+  assert.equal(plan.changes[0].defaultChoice, 'cloud');
+  const writes = mock.writes.length;
+
+  const applied = await savedPasswords.applySavedPasswordChoices(plan, { [local.id]: 'cloud' }, 'account-a');
+  assert.equal(applied.records[0].deleted, true);
+  assert.equal(applied.records[0].syncState, 'synced');
+  assert.equal(applied.unresolved.length, 0);
+  assert.equal(mock.writes.length, writes);
+});
+
+test('a local change on an untouched cloud record is a push that needs confirmation', async () => {
+  const mock = setMock();
+  const local = await makeLocalRecord();
+  const [synced] = await savedPasswords.synchronizeSavedPasswords([local], 'account-a');
+  const edited = { ...synced, deleted: true, syncState: 'pending' };
+  const writes = mock.writes.length;
+
+  const plan = await savedPasswords.planSavedPasswordSync([edited], 'account-a');
+  assert.equal(plan.changes[0].kind, 'push');
+  assert.equal(mock.writes.length, writes);
+
+  const skipped = await savedPasswords.applySavedPasswordChoices(plan, {}, 'account-a');
+  assert.equal(skipped.unresolved.length, 1);
+  assert.equal(mock.writes.length, writes);
+
+  const applied = await savedPasswords.applySavedPasswordChoices(plan, { [local.id]: 'local' }, 'account-a');
+  assert.equal(applied.unresolved.length, 0);
+  assert.equal(mock.writes.at(-1)[2].is_deleted, true);
+});
+
+test('changes on both sides are a conflict that only writes when the user keeps the local copy', async () => {
+  const mock = setMock();
+  const local = await makeLocalRecord();
+  const [synced] = await savedPasswords.synchronizeSavedPasswords([local], 'account-a');
+  mock.records[0].is_deleted = true;
+  const edited = {
+    ...synced,
+    encryptedName: await savedPasswordCrypto.encryptSavedPasswordField('Edited here', MASTER, 'name'),
+    syncState: 'pending',
+  };
+
+  const plan = await savedPasswords.planSavedPasswordSync([edited], 'account-a');
+  assert.equal(plan.changes[0].kind, 'conflict');
+  assert.equal(plan.changes[0].defaultChoice, 'skip');
+  assert.equal(plan.records[0].syncState, 'conflict');
+  const writes = mock.writes.length;
+
+  await savedPasswords.applySavedPasswordChoices(plan, { [local.id]: 'skip' }, 'account-a');
+  assert.equal(mock.writes.length, writes);
+
+  const applied = await savedPasswords.applySavedPasswordChoices(plan, { [local.id]: 'local' }, 'account-a');
+  assert.equal(applied.records[0].syncState, 'synced');
+  assert.equal(mock.writes.at(-1)[0], 'update');
+  assert.equal(mock.writes.at(-1)[2].is_deleted, false);
+});
+
+test('the sync review modal is wired to the startup sync with explicit confirmation', async () => {
+  const modalSource = await readFile(new URL('../src/components/SyncReviewModal.tsx', import.meta.url), 'utf8');
+  assert.match(modalSource, /No es farà cap canvi fins que cliquis/);
+  assert.match(modalSource, /Decideix més tard/);
+  assert.match(chatScreenSource, /planSavedPasswordSync\(savedPasswordRecords, cloudUserId\)/);
+  assert.match(chatScreenSource, /<SyncReviewModal/);
+});
+
+test('the Part B save button is only enabled when there are unsaved changes', async () => {
+  const source = await readFile(new URL('../src/components/SavedPasswordCards.tsx', import.meta.url), 'utf8');
+  assert.match(source, /disabled=\{busy \|\| !hasUnsavedChanges\} onClick=\{\(\) => void save\(\)\}/);
+});
+
+test('Part A cards can be converted to Part B only without unsaved changes, encrypting before deleting', async () => {
+  const bubble = await readFile(new URL('../src/components/PasswordBubble.tsx', import.meta.url), 'utf8');
+  assert.match(bubble, /label: 'Converteix a manual'/);
+  assert.match(bubble, /disabled: hasUnsavedChanges \|\| converting/);
+  assert.match(chatScreenSource, /onConvertToPartB=\{\(\) => handleConvertMessageToPartB\(item\.message\.id\)\}/);
+  const handler = chatScreenSource.slice(chatScreenSource.indexOf('async function handleConvertMessageToPartB'));
+  assert.ok(handler.indexOf('encryptSavedPasswordField') < handler.indexOf('onCloudMessageDelete(message)'));
+  assert.match(handler, /generatePassword\(seedWord, message\.baseWord, message\.options\)/);
+});
+
+test('selected cards are scrolled to the top so confirmation panels stay visible', () => {
+  assert.match(chatScreenSource, /min-width: 640px/);
+  assert.match(chatScreenSource, /pt-4 pb-\[45dvh\]/);
+  assert.doesNotMatch(chatScreenSource, /scrollToMessage\([^)]*, true\)/);
+});
+
+test('manual cards highlight on click like automatic ones and the user-facing names are Manual/Automàtica', async () => {
+  const cards = await readFile(new URL('../src/components/SavedPasswordCards.tsx', import.meta.url), 'utf8');
+  assert.match(cards, /onClickCapture=\{\(\) => onHighlight\?\.\(record\.id\)\}/);
+  assert.match(chatScreenSource, /onHighlight=\{\(id\) => highlightMessage\(id, setHighlightId\)\}/);
+  const modal = await readFile(new URL('../src/components/SyncReviewModal.tsx', import.meta.url), 'utf8');
+  assert.match(modal, /A: 'Automàtica', B: 'Manual'/);
+  assert.doesNotMatch(chatScreenSource, /Només Part|Obre fitxa B/);
+});
+
+test('manual cards use a subtle indigo surface in both collapsed and expanded states', async () => {
+  const visuals = await readFile(new URL('../src/components/PasswordCardVisuals.tsx', import.meta.url), 'utf8');
+  const cards = await readFile(new URL('../src/components/SavedPasswordCards.tsx', import.meta.url), 'utf8');
+  assert.match(visuals, /border-indigo-200 bg-indigo-50\/70/);
+  assert.match(cards, /<PasswordCardSurface manual>/);
+});
+
+const backupSource = await readFile(new URL('../src/lib/backup.ts', import.meta.url), 'utf8');
+const backupJavascript = transpile(backupSource, 'backup.ts')
+  .replaceAll("'@/lib/passwordEncryption'", JSON.stringify(`data:text/javascript,export const encryptExistingPassword=(...args)=>globalThis.__passwordCrypto.encryptExistingPassword(...args);export const decryptExistingPassword=(...args)=>globalThis.__passwordCrypto.decryptExistingPassword(...args);`))
+  .replaceAll("'@/lib/savedPasswordCrypto'", JSON.stringify(`data:text/javascript,export const decryptSavedPasswordDetails=(...args)=>globalThis.__savedCrypto.decryptSavedPasswordDetails(...args);export const decryptSavedPasswordField=(...args)=>globalThis.__savedCrypto.decryptSavedPasswordField(...args);`));
+globalThis.__savedCrypto = savedPasswordCrypto;
+const backup = await import(`data:text/javascript;base64,${Buffer.from(backupJavascript).toString('base64')}`);
+
+const BACKUP_MASTER = ' Mestra ñ€ 😀 ';
+const backupAutomatic = [{ baseWord: 'gmail', options: { length: 16, uppercase: true, lowercase: true, numbers: true, symbols: false, allowedSymbols: '' }, comment: 'principal' }];
+const backupManual = [{ name: 'Banc', password: 'S3cr3t-únic!', notes: 'nota', icon: 'key' }];
+
+test('backups round-trip A+B and manual-only with the exact master word', async () => {
+  const all = await backup.createBackupFile({ automatic: backupAutomatic, manual: backupManual }, 'all', BACKUP_MASTER);
+  assert.equal(backup.looksLikeBackup(all), true);
+  assert.equal(all.includes('S3cr3t'), false);
+  assert.equal(all.includes('Banc'), false);
+  const restored = await backup.readBackupFile(all, BACKUP_MASTER);
+  assert.deepEqual(restored.automatic, backupAutomatic);
+  assert.equal(restored.manual[0].password, 'S3cr3t-únic!');
+  assert.equal(restored.manual[0].name, 'Banc');
+
+  const manualOnly = await backup.createBackupFile({ automatic: [], manual: backupManual }, 'manual', BACKUP_MASTER);
+  assert.deepEqual((await backup.readBackupFile(manualOnly, BACKUP_MASTER)).automatic, []);
+});
+
+test('backups reject another master word, tampering and invalid files', async () => {
+  const file = await backup.createBackupFile({ automatic: backupAutomatic, manual: backupManual }, 'all', BACKUP_MASTER);
+  await assert.rejects(backup.readBackupFile(file, BACKUP_MASTER.trim()), /paraula mestra/);
+  const parsed = JSON.parse(file);
+  const bytes = Buffer.from(parsed.data.ciphertext, 'base64');
+  bytes[0] ^= 1;
+  parsed.data.ciphertext = bytes.toString('base64');
+  await assert.rejects(backup.readBackupFile(JSON.stringify(parsed), BACKUP_MASTER));
+  await assert.rejects(backup.readBackupFile('{"format":"x"}', BACKUP_MASTER), /no és vàlid/);
+  assert.equal(backup.looksLikeBackup('gmail\t16'), false);
+});
+
+test('import/export modal offers three export scopes and asks per duplicate', async () => {
+  const modal = await readFile(new URL('../src/components/ImportExportModal.tsx', import.meta.url), 'utf8');
+  assert.match(modal, /value: 'A'[\s\S]*value: 'B'[\s\S]*value: 'AB'/);
+  assert.match(modal, /Conserva l'actual/);
+  assert.match(modal, /Substitueix-la/);
+  assert.match(modal, /!item\.duplicate \|\| decisions\[item\.id\] === 'replace'/);
+});
+
+test('search modal also finds manual cards by name and notes', async () => {
+  const search = await readFile(new URL('../src/components/SearchModal.tsx', import.meta.url), 'utf8');
+  assert.match(search, /item\.name\.toLowerCase\(\)\.includes\(normalized\)/);
+  assert.match(search, /item\.notes\.toLowerCase\(\)\.includes\(normalized\)/);
+  assert.match(chatScreenSource, /manualItems=\{/);
 });

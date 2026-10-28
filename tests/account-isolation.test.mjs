@@ -26,7 +26,6 @@ const storageSource = await readFile(new URL('../src/lib/storage.ts', import.met
 const storage = await importSource(storageSource, 'storage.ts');
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const optionsPanelSource = await readFile(new URL('../src/components/OptionsPanel.tsx', import.meta.url), 'utf8');
-const cloudReadDiagnosticsSource = await readFile(new URL('../src/components/CloudReadDiagnosticsModal.tsx', import.meta.url), 'utf8');
 const unlockScreenSource = await readFile(new URL('../src/components/UnlockScreen.tsx', import.meta.url), 'utf8');
 const chatScreenSource = await readFile(new URL('../src/components/ChatScreen.tsx', import.meta.url), 'utf8');
 const recycleBinSource = await readFile(new URL('../src/components/RecycleBinModal.tsx', import.meta.url), 'utf8');
@@ -293,176 +292,6 @@ test('cloud list and update helpers report missing authentication instead of suc
     /Inicia sessió al núvol/,
   );
   assert.deepEqual(globalThis.__cloudTest.writes, []);
-});
-
-test('PocketBase diagnostic explicitly paginates twice and returns counts only', async () => {
-  const records = Array.from({ length: 101 }, (_, index) => ({
-    id: `record-${String(index).padStart(3, '0')}`,
-    user_id: 'account-a',
-    updated: `2026-01-${String((index % 28) + 1).padStart(2, '0')}`,
-    is_deleted: index % 2 === 0,
-  }));
-  const reads = [];
-  globalThis.__cloudTest = {
-    user: { id: 'account-a' },
-    reads,
-    writes: [],
-    cancelled: [],
-    getList: async (page, perPage, options) => {
-      const start = (page - 1) * perPage;
-      return {
-        page,
-        perPage,
-        totalItems: records.length,
-        totalPages: Math.ceil(records.length / perPage),
-        items: records.slice(start, start + perPage),
-      };
-    },
-  };
-
-  const result = await cloudSync.runCloudReadDiagnostic();
-
-  assert.deepEqual(result, {
-    recordCount: 101,
-    firstReadPages: 2,
-    secondReadPages: 2,
-    uniqueRecordCount: 101,
-    repeatedReadStable: true,
-  });
-  assert.equal(reads.length, 4);
-  assert.deepEqual(reads.map(([page]) => page), [1, 2, 1, 2]);
-  for (const [, perPage, options] of reads) {
-    assert.equal(perPage, 100);
-    assert.equal(options.filter, 'user_id = "account-a"');
-    assert.equal(options.fields, 'id,user_id,updated,is_deleted');
-    assert.equal(options.sort, 'id');
-  }
-  assert.equal(globalThis.__cloudTest.writes.length, 0);
-  assert.equal(Object.keys(result).some((key) => /id|record/i.test(key) && !/count/i.test(key)), false);
-});
-
-test('PocketBase diagnostic reports no session instead of an empty collection', async () => {
-  globalThis.__cloudTest = { user: null, reads: [], writes: [], cancelled: [] };
-  await assert.rejects(
-    cloudSync.runCloudReadDiagnostic(),
-    (error) => error.code === 'AUTH_REQUIRED',
-  );
-  assert.deepEqual(globalThis.__cloudTest.reads, []);
-  assert.deepEqual(globalThis.__cloudTest.writes, []);
-});
-
-test('PocketBase diagnostic distinguishes an authenticated empty collection from errors', async () => {
-  globalThis.__cloudTest = {
-    user: { id: 'account-a' },
-    reads: [],
-    writes: [],
-    cancelled: [],
-    getList: async (page) => ({ page, perPage: 100, totalItems: 0, totalPages: 0, items: [] }),
-  };
-
-  const result = await cloudSync.runCloudReadDiagnostic();
-
-  assert.equal(result.recordCount, 0);
-  assert.equal(result.uniqueRecordCount, 0);
-  assert.equal(result.repeatedReadStable, true);
-  assert.equal(globalThis.__cloudTest.reads.length, 2);
-  assert.deepEqual(globalThis.__cloudTest.writes, []);
-});
-
-test('PocketBase diagnostic classifies authentication, permission, and network read failures', async () => {
-  for (const [status, code] of [[401, 'AUTH_FAILED'], [403, 'PERMISSION_DENIED'], [0, 'NETWORK_ERROR']]) {
-    globalThis.__cloudTest = {
-      user: { id: 'account-a' },
-      reads: [],
-      writes: [],
-      cancelled: [],
-      getList: async () => {
-        const error = new Error('redacted request failure');
-        error.status = status;
-        throw error;
-      },
-    };
-    await assert.rejects(
-      cloudSync.runCloudReadDiagnostic(),
-      (error) => error.code === code && !error.message.includes('redacted request failure'),
-    );
-    assert.deepEqual(globalThis.__cloudTest.writes, []);
-  }
-});
-
-test('PocketBase diagnostic rejects foreign owners, repeated IDs, and inconsistent page totals', async () => {
-  const cases = [
-    {
-      code: 'FOREIGN_RECORD',
-      getList: async (page) => ({ page, perPage: 100, totalItems: 1, totalPages: 1, items: [
-        { id: 'opaque-id', user_id: 'account-b', updated: '', is_deleted: false },
-      ] }),
-    },
-    {
-      code: 'INCONSISTENT_RESULT',
-      getList: async (page) => ({ page, perPage: 100, totalItems: 2, totalPages: 1, items: [
-        { id: 'same-id', user_id: 'account-a', updated: '', is_deleted: false },
-        { id: 'same-id', user_id: 'account-a', updated: '', is_deleted: false },
-      ] }),
-    },
-    {
-      code: 'INCONSISTENT_RESULT',
-      getList: async (page) => ({ page, perPage: 100, totalItems: 2, totalPages: 1, items: [
-        { id: 'opaque-id', user_id: 'account-a', updated: '', is_deleted: false },
-      ] }),
-    },
-  ];
-
-  for (const testCase of cases) {
-    globalThis.__cloudTest = {
-      user: { id: 'account-a' },
-      reads: [],
-      writes: [],
-      cancelled: [],
-      getList: testCase.getList,
-    };
-    await assert.rejects(
-      cloudSync.runCloudReadDiagnostic(),
-      (error) => error.code === testCase.code,
-    );
-    assert.deepEqual(globalThis.__cloudTest.writes, []);
-  }
-});
-
-test('PocketBase diagnostic stops if the two complete reads differ', async () => {
-  let callCount = 0;
-  globalThis.__cloudTest = {
-    user: { id: 'account-a' },
-    reads: [],
-    writes: [],
-    cancelled: [],
-    getList: async (page) => {
-      callCount += 1;
-      return {
-        page,
-        perPage: 100,
-        totalItems: 1,
-        totalPages: 1,
-        items: [{ id: 'opaque-id', user_id: 'account-a', updated: `revision-${callCount}`, is_deleted: false }],
-      };
-    },
-  };
-
-  await assert.rejects(
-    cloudSync.runCloudReadDiagnostic(),
-    (error) => error.code === 'INCONSISTENT_RESULT',
-  );
-  assert.equal(globalThis.__cloudTest.reads.length, 2);
-  assert.deepEqual(globalThis.__cloudTest.writes, []);
-});
-
-test('diagnostic UI compares the admin count and does not claim completeness without rules confirmation', () => {
-  assert.match(optionsPanelSource, /CloudReadDiagnosticsModal/);
-  assert.match(cloudReadDiagnosticsSource, /Recompte de registres del compte de prova/);
-  assert.match(cloudReadDiagnosticsSource, /He revisat per una via autoritzada/);
-  assert.match(cloudReadDiagnosticsSource, /no es podrà indicar que la lectura és completa/);
-  assert.match(cloudReadDiagnosticsSource, /No s’ha considerat el resultat com una llista buida/);
-  assert.match(appSource, /const cloudActionsEnabled = true/);
 });
 
 test('cloud database inspection is read-only and returns only authenticated PocketBase records with logo fields', async () => {
@@ -1375,3 +1204,90 @@ test('unmounts the chat during PIN lock and restores focused field selection aft
 function readPinSecurityStatusSource() {
   return /if \(!currentSecurity\.status\)[\s\S]*return;/.test(unlockScreenSource);
 }
+
+function setupPartASync(records) {
+  installLocalStorage();
+  globalThis.__cloudTest = {
+    user: { id: 'account-a' },
+    writes: [],
+    cancelled: [],
+    getFullList: async () => records,
+    update: async (id, fields) => ({ ...records.find((record) => record.id === id), ...fields }),
+    create: async (payload) => ({ id: 'new', ...payload }),
+  };
+}
+
+test('Part A: matching local and cloud copies need no review and write nothing', async () => {
+  setupPartASync([cloudRecord('r1')]);
+  const local = { ...chatMessage('alpha', 'local-1'), comment: 'private comment' };
+  const plan = await cloudSync.planMessageSync('seed', true, 'account-a', [local]);
+  assert.deepEqual(plan.changes, []);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('Part A: a cloud deletion with an untouched local copy is a pull, not a conflict', async () => {
+  const records = [cloudRecord('r1')];
+  setupPartASync(records);
+  const local = { ...chatMessage('alpha', 'local-1'), comment: 'private comment' };
+  await cloudSync.planMessageSync('seed', true, 'account-a', [local]);
+  records[0].is_deleted = true;
+
+  const plan = await cloudSync.planMessageSync('seed', true, 'account-a', [local]);
+  assert.equal(plan.changes[0].kind, 'pull');
+  assert.equal(plan.changes[0].defaultChoice, 'cloud');
+  const result = await cloudSync.applyMessageChoices(plan, { 'local-1': 'cloud' }, 'seed', 'account-a');
+  assert.deepEqual(result.messages, []);
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+});
+
+test('Part A: a local edit on an unchanged cloud copy is a push that is only written when chosen', async () => {
+  setupPartASync([cloudRecord('r1')]);
+  const local = { ...chatMessage('alpha', 'local-1'), comment: 'private comment' };
+  await cloudSync.planMessageSync('seed', true, 'account-a', [local]);
+  const edited = { ...local, comment: 'edited here' };
+
+  const plan = await cloudSync.planMessageSync('seed', true, 'account-a', [edited]);
+  assert.equal(plan.changes[0].kind, 'push');
+  await cloudSync.applyMessageChoices(plan, {}, 'seed', 'account-a');
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+  const applied = await cloudSync.applyMessageChoices(plan, { 'local-1': 'local' }, 'seed', 'account-a');
+  assert.equal(applied.unresolved.length, 0);
+  assert.equal(globalThis.__cloudTest.writes[0][0], 'update');
+});
+
+test('Part A: changes on both sides are a conflict resolved only by the user', async () => {
+  setupPartASync([cloudRecord('r1', { encrypted_comment: 'cloud comment' })]);
+  const local = { ...chatMessage('alpha', 'local-1'), comment: 'local comment' };
+
+  const plan = await cloudSync.planMessageSync('seed', true, 'account-a', [local]);
+  assert.equal(plan.changes[0].kind, 'conflict');
+  assert.equal(plan.changes[0].defaultChoice, 'skip');
+  const kept = await cloudSync.applyMessageChoices(plan, { 'local-1': 'cloud' }, 'seed', 'account-a');
+  assert.equal(kept.messages[0].comment, 'cloud comment');
+  assert.deepEqual(globalThis.__cloudTest.writes, []);
+  const pushed = await cloudSync.applyMessageChoices(plan, { 'local-1': 'local' }, 'seed', 'account-a');
+  assert.equal(pushed.unresolved.length, 0);
+  assert.equal(globalThis.__cloudTest.writes.at(-1)[0], 'update');
+});
+
+test('one review modal handles Part A and Part B changes together', async () => {
+  const modalSource = await readFile(new URL('../src/components/SyncReviewModal.tsx', import.meta.url), 'utf8');
+  assert.match(modalSource, /messageChanges/);
+  assert.match(modalSource, /part: 'A'/);
+  assert.match(modalSource, /part: 'B'/);
+  assert.match(chatScreenSource, /messageChanges=\{messageChanges\}/);
+  assert.match(chatScreenSource, /onApplyMessageChoices\(/);
+});
+
+test('preferences offer a manual local-vs-cloud comparison that opens the review modal', async () => {
+  assert.match(optionsPanelSource, /Compara local i núvol/);
+  assert.match(optionsPanelSource, /onCompareWithCloud/);
+  assert.match(chatScreenSource, /onCompareWithCloud=\{handleCompareWithCloud\}/);
+  assert.match(chatScreenSource, /setSyncReviewOpen\(true\)/);
+});
+
+test('the review modal lists which records differ, not only how many', async () => {
+  const modalSource = await readFile(new URL('../src/components/SyncReviewModal.tsx', import.meta.url), 'utf8');
+  assert.match(modalSource, /aria-label="Fitxes que no coincideixen"/);
+  assert.match(modalSource, /SHORT_KIND\[row\.kind\]/);
+});

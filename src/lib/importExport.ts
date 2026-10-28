@@ -179,6 +179,18 @@ export function messagesToExportText(messages: ChatMessage[]): string {
   return [header, ...lines].join('\n');
 }
 
+export function downloadTextFile(content: string, fileName: string, mime: string): void {
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function downloadExportFile(messages: ChatMessage[]): void {
   const content = messagesToExportText(messages);
   const blob = new Blob([content], { type: 'text/tab-separated-values;charset=utf-8' });

@@ -16,7 +16,8 @@ import {
 import { decryptSeed } from '@/lib/passwordGenerator';
 import { verifySeedVaultPin } from '@/lib/seedVault';
 import { getCloudUser, pb, signOut } from '@/lib/pocketbase';
-import { cancelCloudSyncRequests, markMessageDeleted, mergeLocalWithCloud, saveMessageLogo, upsertMessage } from '@/lib/cloudSync';
+import { applyMessageChoices, cancelCloudSyncRequests, markMessageDeleted, planMessageSync, saveMessageLogo, upsertMessage } from '@/lib/cloudSync';
+import type { MessageSyncChoice, MessageSyncPlan } from '@/lib/cloudSync';
 import { applyTheme, getTheme, setTheme, Theme } from '@/lib/theme';
 
 type AppState = 'loading' | 'auth' | 'setup' | 'locked' | 'unlocked';
@@ -227,14 +228,14 @@ export default function App() {
     continueToApp();
   }
 
-  async function syncInitialMessages(localMessages: ChatMessage[]): Promise<ChatMessage[]> {
-    if (!cloudActionsEnabled) return localMessages;
+  async function syncInitialMessages(localMessages: ChatMessage[]): Promise<MessageSyncPlan> {
+    if (!cloudActionsEnabled) return { messages: localMessages, changes: [] };
     const userId = cloudUserId;
-    if (!userId) return localMessages;
+    if (!userId) return { messages: localMessages, changes: [] };
     if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat.');
     setCloudStatus('syncing');
     try {
-      const merged = await mergeLocalWithCloud(seedWord, defaultSettings.autoHide, userId, localMessages);
+      const merged = await planMessageSync(seedWord, defaultSettings.autoHide, userId, localMessages);
       if (getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat.');
       setCloudStatus('synced');
       return merged;
@@ -242,6 +243,18 @@ export default function App() {
       if (getCloudUser()?.id === userId) setCloudStatus('error');
       throw error;
     }
+  }
+
+  async function applyCloudMessageChoices(
+    plan: MessageSyncPlan,
+    choices: Record<string, MessageSyncChoice>,
+  ): Promise<{ messages: ChatMessage[]; unresolved: MessageSyncPlan['changes'] }> {
+    const userId = cloudUserId;
+    if (!userId || getCloudUser()?.id !== userId) throw new Error('La sessió del compte ha canviat.');
+    setCloudStatus('syncing');
+    const result = await applyMessageChoices(plan, choices, seedWord, userId);
+    if (getCloudUser()?.id === userId) setCloudStatus(result.unresolved.length > 0 ? 'error' : 'synced');
+    return result;
   }
 
   function syncMessage(message: ChatMessage): void {
@@ -351,6 +364,7 @@ export default function App() {
             onLock={lockApp}
             cloudStatus={cloudStatus}
             onInitialSync={cloudActionsEnabled ? syncInitialMessages : undefined}
+            onApplyMessageChoices={applyCloudMessageChoices}
             onCloudMessageChange={cloudActionsEnabled ? syncMessage : undefined}
             onCloudMessageDelete={cloudUserId ? deleteCloudMessage : undefined}
             onCloudLogoChange={cloudActionsEnabled ? saveCloudMessageLogo : undefined}
